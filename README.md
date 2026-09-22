@@ -1,4 +1,4 @@
-# shadowsocks_ohos 原型
+# shadowsocks_ohos
 
 HarmonyOS VPN 原型：应用内启动 `go-shadowsocks2`（SOCKS5 `:1080`），再用 `go-tun2socks` 把系统 VPN TUN fd 转到该 SOCKS5。
 
@@ -21,7 +21,11 @@ App 流量 → HarmonyOS VPN TUN fd
 
 需要使用HarmonyOS的go编译器来编译，否则`https://github.com/sysit/ohos-go.git`
 
-标准 Linux Go 的 c-shared 仍然不兼容这里的动态 TLS。需要为ohos定制的go编译器。
+标准 Linux Go 的 c-shared 仍然不兼容这里的动态 TLS。需要为ohos定制的go编译器。下载ohos-go，并解压到tmp目录。
+
+```bash
+curl -fL --connect-timeout 20 --max-time 180 https://codeload.github.com/sysit/ohos-go/tar.gz/2417e0834a96530125db3d295884c1ddf86777d7 -o /tmp/shadowsocks-ohos-go-2417e08.tar.gz && mkdir -p /tmp/shadowsocks-ohos-go-2417e08 && tar -xzf /tmp/shadowsocks-ohos-go-2417e08.tar.gz --strip-components=1 -C /tmp/shadowsocks-ohos-go-2417e08 && rg -n 'c-shared|TLS|make.bash|GOOS|CGO|CC=' /tmp/shadowsocks-ohos-go-2417e08/docs -g '*.md' | head -85
+```
 
 - 使用支持 `openharmony/arm64` 的 Go 工具链；普通 `GOOS=linux` 的 Go 动态库存在 OHOS TLS 兼容问题。
 - 主机回归测试使用 PATH 中的标准 `go`（1.24.1 或更高版本），可通过 `HOST_GO` 指定。
