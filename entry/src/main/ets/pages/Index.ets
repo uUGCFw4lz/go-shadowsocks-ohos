@@ -4,6 +4,10 @@ import { BUNDLE_NAME, VPN_ABILITY } from '../model/SsConfig';
 import { readLog, readConnectionState } from '../model/AppLog';
 import { CIPHERS, ServerProfile, ServerStore, serverUrl, validateServer } from '../model/ServerStore';
 import { RoutingStore } from '../model/RoutingStore';
+import { parseServerUrl, shareServerUrl } from '../model/ServerLink';
+import { pasteboard, BusinessError } from '@kit.BasicServicesKit';
+import { scanBarcode, scanCore } from '@kit.ScanKit';
+import { systemShare } from '@kit.ShareKit';
 
 @Entry
 @Component
@@ -31,6 +35,14 @@ struct Index {
   @State updatingRules: boolean = false;
   @State rulesStatus: string = '尚未下载 GFWList';
   @State rulesReady: boolean = false;
+  @State importing: boolean = false;
+  @State importText: string = '';
+  @State importError: string = '';
+  @State importingBusy: boolean = false;
+  @State shareLink: string = '';
+  @State shareName: string = '';
+  @State shareStatus: string = '';
+  @State sharingBusy: boolean = false;
   private observer: vpnExtension.VpnObserver | undefined = undefined;
   private timer: number = -1;
   private requestTime: number = 0;
@@ -65,6 +77,16 @@ struct Index {
   }
 
   onBackPress(): boolean {
+    if (this.importing) {
+      if (!this.importingBusy) {
+        this.closeImport();
+      }
+      return true;
+    }
+    if (this.shareLink) {
+      this.closeShare();
+      return true;
+    }
     if (this.editing) {
       if (!this.saving) {
         this.closeEditor();
@@ -188,6 +210,125 @@ struct Index {
   private closeEditor(): void {
     this.editing = false;
     this.editPassword = '';
+  }
+
+  private openImport(): void {
+    if (!this.ready || this.busy || this.requested) {
+      return;
+    }
+    this.importText = '';
+    this.importError = '';
+    this.importing = true;
+  }
+
+  private closeImport(): void {
+    this.importing = false;
+    this.importText = '';
+    this.importError = '';
+  }
+
+  private importServer(link: string): void {
+    if (this.requested || !this.ready) {
+      this.importError = '请先断开 VPN';
+      return;
+    }
+    try {
+      const server = parseServerUrl(link);
+      this.closeImport();
+      this.openEditor(server);
+    } catch (err) {
+      this.importError = err instanceof Error ? err.message : '服务器链接无效';
+    }
+  }
+
+  private async importClipboard(): Promise<void> {
+    if (this.importingBusy) {
+      return;
+    }
+    this.importingBusy = true;
+    this.importError = '';
+    try {
+      const data = await pasteboard.getSystemPasteboard().getData();
+      this.importServer(data.getPrimaryText());
+    } catch (_) {
+      this.importError = '无法读取剪贴板，请重新点击粘贴或手动输入链接';
+    } finally {
+      this.importingBusy = false;
+    }
+  }
+
+  private async scanServer(): Promise<void> {
+    if (this.importingBusy) {
+      return;
+    }
+    this.importingBusy = true;
+    this.importError = '';
+    try {
+      if (typeof scanCore.isDefaultScanSupported === 'function' && !scanCore.isDefaultScanSupported()) {
+        this.importError = '此设备不支持系统扫码，请使用粘贴导入';
+        return;
+      }
+      const result = await scanBarcode.startScanForResult(this.context(), {
+        scanTypes: [scanCore.ScanType.QR_CODE], enableMultiMode: false, enableAlbum: true
+      });
+      this.importServer(result.originalValue);
+    } catch (err) {
+      const code = (err as BusinessError).code;
+      if (code !== scanCore.ScanErrorCode.SCAN_SERVICE_CANCELED) {
+        this.importError = `无法打开系统扫码（${code ?? '未知错误'}），请重试或使用粘贴导入`;
+      }
+    } finally {
+      this.importingBusy = false;
+    }
+  }
+
+  private openShare(server: ServerProfile): void {
+    try {
+      this.shareLink = shareServerUrl(server);
+      this.shareName = server.name;
+      this.shareStatus = '';
+    } catch (_) {
+      this.error = '配置无效或过长，无法分享';
+    }
+  }
+
+  private closeShare(): void {
+    this.shareLink = '';
+    this.shareName = '';
+    this.shareStatus = '';
+  }
+
+  private async copyServerLink(): Promise<void> {
+    if (this.sharingBusy || !this.shareLink) {
+      return;
+    }
+    this.sharingBusy = true;
+    try {
+      await pasteboard.getSystemPasteboard().setData(pasteboard.createData(pasteboard.MIMETYPE_TEXT_PLAIN, this.shareLink));
+      this.shareStatus = '链接已复制';
+    } catch (_) {
+      this.shareStatus = '复制失败，请重试';
+    } finally {
+      this.sharingBusy = false;
+    }
+  }
+
+  private async shareServerLink(): Promise<void> {
+    if (this.sharingBusy || !this.shareLink) {
+      return;
+    }
+    this.sharingBusy = true;
+    try {
+      const data = new systemShare.SharedData({
+        utd: 'general.plain-text', content: this.shareLink, title: this.shareName
+      });
+      const controller = new systemShare.ShareController(data);
+      await controller.show(this.context(), { previewMode: systemShare.SharePreviewMode.DEFAULT });
+    } catch (_) {
+      this.shareStatus = '未完成分享，可使用复制链接';
+    } finally {
+      this.sharingBusy = false;
+    }
   }
 
   private async saveServer(): Promise<void> {
@@ -339,8 +480,93 @@ struct Index {
   }
 
   @Builder
+  private importPage() {
+    Column({ space: 16 }) {
+      Row() {
+        Button('取消').backgroundColor('#E7EDE9').fontColor('#182A23')
+          .enabled(!this.importingBusy).onClick(() => this.closeImport())
+        Text('导入服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#182A23')
+          .layoutWeight(1).textAlign(TextAlign.End)
+      }.width('100%')
+      Row({ space: 12 }) {
+        Row() {
+          PasteButton().height(44).width('100%')
+            .enabled(!this.importingBusy && !this.requested)
+            .onClick((event: ClickEvent, result: PasteButtonOnClickResult) => {
+              if (result === PasteButtonOnClickResult.SUCCESS) {
+                this.importClipboard();
+              } else {
+                this.importError = '未获得剪贴板访问权限，可手动粘贴链接';
+              }
+            })
+        }.layoutWeight(1)
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 8 }) {
+            SymbolGlyph($r('sys.symbol.qrcode')).fontSize(20).fontColor(['#FFFFFF'])
+            Text('扫码').fontSize(16).fontColor('#FFFFFF')
+          }
+        }.height(44).layoutWeight(1).borderRadius(6).backgroundColor('#147D59')
+          .enabled(!this.importingBusy && !this.requested).onClick(() => this.scanServer())
+      }.width('100%')
+      TextArea({ text: this.importText, placeholder: 'ss://' }).maxLength(8192)
+        .fontColor('#182A23').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+        .layoutWeight(1).width('100%').enabled(!this.importingBusy)
+        .onChange((value: string) => { this.importText = value; this.importError = ''; })
+      if (this.importError) {
+        Text(this.importError).fontSize(13).fontColor('#B42318').width('100%')
+      }
+      Button('读取配置', { type: ButtonType.Normal }).width('100%').height(48)
+        .borderRadius(6).backgroundColor('#147D59')
+        .enabled(!this.importingBusy && !this.requested && this.importText.trim().length > 0)
+        .onClick(() => this.importServer(this.importText))
+    }.width('100%').height('100%')
+  }
+
+  @Builder
+  private sharePage() {
+    Column({ space: 16 }) {
+      Row() {
+        Button('返回').backgroundColor('#E7EDE9').fontColor('#182A23')
+          .onClick(() => this.closeShare())
+        Text('分享服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#182A23')
+          .layoutWeight(1).textAlign(TextAlign.End)
+      }.width('100%')
+      Scroll() {
+        Column({ space: 16 }) {
+          Text(this.shareName).fontSize(18).fontWeight(FontWeight.Medium).fontColor('#182A23')
+            .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
+          if (this.shareLink.length <= 512) {
+            Column() {
+              QRCode(this.shareLink).width('100%').aspectRatio(1).color('#000000').backgroundColor('#FFFFFF')
+            }.width('100%').constraintSize({ maxWidth: 288 }).padding(16).backgroundColor('#FFFFFF')
+              .accessibilityText('服务器配置二维码，包含密码')
+          } else {
+            Text('链接过长，无法显示二维码').fontSize(14).fontColor('#B42318')
+          }
+          Text('包含服务器密码，请仅分享给可信的人').fontSize(13).fontColor('#B42318').width('100%')
+        }.width('100%')
+      }.layoutWeight(1).width('100%')
+      if (this.shareStatus) {
+        Text(this.shareStatus).fontSize(13).fontColor('#52635D').width('100%')
+      }
+      Row({ space: 12 }) {
+        Button('复制链接', { type: ButtonType.Normal }).height(48).layoutWeight(1).borderRadius(6)
+          .backgroundColor('#E7EDE9').fontColor('#182A23').enabled(!this.sharingBusy)
+          .onClick(() => this.copyServerLink())
+        Button({ type: ButtonType.Normal }) {
+          Row({ space: 8 }) {
+            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#FFFFFF'])
+            Text('分享').fontSize(16).fontColor('#FFFFFF')
+          }
+        }.height(48).layoutWeight(1).borderRadius(6).backgroundColor('#147D59')
+          .enabled(!this.sharingBusy).onClick(() => this.shareServerLink())
+      }.width('100%')
+    }.width('100%').height('100%')
+  }
+
+  @Builder
   private serverRow(server: ServerProfile) {
-    Row({ space: 12 }) {
+    Row({ space: 8 }) {
       Radio({ value: server.id, group: 'servers' }).checked(server.id === this.selectedId)
         .radioStyle({ checkedBackgroundColor: '#147D59' }).enabled(!this.requested && !this.busy)
         .accessibilityText(`选择 ${server.name}`).onChange((checked: boolean) => { if (checked) { this.choose(server); } })
@@ -351,6 +577,11 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Text(server.method).fontSize(11).fontColor('#78877F').width('100%')
       }.layoutWeight(1).alignItems(HorizontalAlign.Start).onClick(() => this.choose(server))
+      Button({ type: ButtonType.Normal }) {
+        SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#52635D'])
+      }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
+        .accessibilityText(`分享 ${server.name}`).bindTips('分享服务器').enabled(!this.busy)
+        .onClick(() => this.openShare(server))
       Button({ type: ButtonType.Normal }) {
         SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor(['#52635D'])
       }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
@@ -368,7 +599,11 @@ struct Index {
 
   build() {
     Column() {
-      if (this.editing) {
+      if (this.importing) {
+        this.importPage()
+      } else if (this.shareLink) {
+        this.sharePage()
+      } else if (this.editing) {
         this.editor()
       } else if (this.showLogs) {
         Row() {
@@ -424,6 +659,11 @@ struct Index {
           Text('服务器').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#182A23')
           Text(`${this.servers.length}`).fontSize(13).fontColor('#78877F').margin({ left: 8 })
           Blank()
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.arrow_down_circle')).fontSize(23).fontColor(['#147D59'])
+          }.width(44).height(44).backgroundColor(Color.Transparent)
+            .accessibilityText('导入服务器').bindTips('导入服务器')
+            .enabled(this.ready && !this.busy && !this.requested).onClick(() => this.openImport())
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.plus')).fontSize(23).fontColor(['#147D59'])
           }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('添加服务器')
