@@ -23,10 +23,11 @@ type routingOptions struct {
 
 type routeTable struct {
 	sync.RWMutex
-	rules   *domainRules
-	domains map[string]string
-	hosts   map[string]string
-	path    string
+	allocation sync.Mutex
+	rules      *domainRules
+	domains    map[string]string
+	hosts      map[string]string
+	path       string
 }
 
 var routes = &routeTable{domains: make(map[string]string), hosts: make(map[string]string)}
@@ -69,6 +70,8 @@ func configureRouting(path string) error {
 			return err
 		}
 	}
+	routes.allocation.Lock()
+	defer routes.allocation.Unlock()
 	routes.Lock()
 	defer routes.Unlock()
 	mapPath := filepath.Join(filepath.Dir(path), "fake-ip.json")
@@ -108,8 +111,14 @@ func routingEnabled() bool {
 }
 
 func (table *routeTable) fakeIP(domain string) (netip.Addr, error) {
-	table.Lock()
-	defer table.Unlock()
+	table.RLock()
+	cached := table.domains[domain]
+	table.RUnlock()
+	if cached != "" {
+		return netip.ParseAddr(cached)
+	}
+	table.allocation.Lock()
+	defer table.allocation.Unlock()
 	if address := table.domains[domain]; address != "" {
 		return netip.ParseAddr(address)
 	}
@@ -118,9 +127,13 @@ func (table *routeTable) fakeIP(domain string) (netip.Addr, error) {
 		if table.hosts[address.String()] != "" {
 			continue
 		}
-		table.domains[domain] = address.String()
 		if table.path != "" {
-			data, err := json.Marshal(table.domains)
+			snapshot := make(map[string]string, len(table.domains)+1)
+			for host, ip := range table.domains {
+				snapshot[host] = ip
+			}
+			snapshot[domain] = address.String()
+			data, err := json.Marshal(snapshot)
 			if err == nil {
 				err = os.WriteFile(table.path+".tmp", data, 0600)
 			}
@@ -128,11 +141,13 @@ func (table *routeTable) fakeIP(domain string) (netip.Addr, error) {
 				err = os.Rename(table.path+".tmp", table.path)
 			}
 			if err != nil {
-				delete(table.domains, domain)
 				return netip.Addr{}, err
 			}
 		}
+		table.Lock()
+		table.domains[domain] = address.String()
 		table.hosts[address.String()] = domain
+		table.Unlock()
 		return address, nil
 	}
 	return netip.Addr{}, fmt.Errorf("fake IP pool exhausted")

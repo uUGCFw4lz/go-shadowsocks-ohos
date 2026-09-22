@@ -8,6 +8,7 @@ import { parseServerUrl, shareServerUrl } from '../model/ServerLink';
 import { pasteboard, BusinessError } from '@kit.BasicServicesKit';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
 import { systemShare } from '@kit.ShareKit';
+import { DARK_THEME, LIGHT_THEME, ThemeMode, ThemePalette, ThemeStore } from '../model/ThemeStore';
 
 @Entry
 @Component
@@ -43,11 +44,13 @@ struct Index {
   @State shareName: string = '';
   @State shareStatus: string = '';
   @State sharingBusy: boolean = false;
+  @State themeMode: ThemeMode = 'light';
   private observer: vpnExtension.VpnObserver | undefined = undefined;
   private timer: number = -1;
   private requestTime: number = 0;
 
   aboutToAppear(): void {
+    this.loadTheme();
     this.loadServers();
     this.pollStatus();
     this.timer = setInterval(() => this.pollStatus(), 1000);
@@ -102,6 +105,32 @@ struct Index {
 
   private context(): common.UIAbilityContext {
     return this.getUIContext().getHostContext() as common.UIAbilityContext;
+  }
+
+  private colors(): ThemePalette {
+    return this.themeMode === 'dark' ? DARK_THEME : LIGHT_THEME;
+  }
+
+  private async loadTheme(): Promise<void> {
+    try {
+      const mode = await ThemeStore.mode(this.context());
+      ThemeStore.apply(this.context(), mode);
+      this.themeMode = mode;
+    } catch (_) {
+      this.themeMode = 'light';
+    }
+  }
+
+  private async toggleTheme(): Promise<void> {
+    const previous = this.themeMode;
+    const mode: ThemeMode = previous === 'dark' ? 'light' : 'dark';
+    this.themeMode = mode;
+    try {
+      await ThemeStore.save(this.context(), mode);
+    } catch (_) {
+      this.themeMode = previous;
+      this.error = '主题设置保存失败';
+    }
   }
 
   private async loadServers(): Promise<void> {
@@ -397,7 +426,7 @@ struct Index {
     this.getUIContext().showAlertDialog({
       title: '删除服务器', message: `删除“${server.name}”？`,
       primaryButton: { value: '取消', action: () => {} },
-      secondaryButton: { value: '删除', fontColor: '#B42318', action: () => { this.deleteServer(server); } }
+      secondaryButton: { value: '删除', fontColor: this.colors().danger, action: () => { this.deleteServer(server); } }
     });
   }
 
@@ -467,7 +496,7 @@ struct Index {
 
   @Builder
   private fieldLabel(title: string) {
-    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor('#52635D')
+    Text(title).fontSize(13).fontWeight(FontWeight.Medium).fontColor(this.colors().secondaryText)
       .width('100%').margin({ top: 20, bottom: 8 })
   }
 
@@ -475,42 +504,44 @@ struct Index {
   private editor() {
     Column() {
       Text(this.editId ? '编辑服务器' : '添加服务器').fontSize(24).fontWeight(FontWeight.Bold)
-        .fontColor('#182A23').width('100%').margin({ bottom: 12 })
+        .fontColor(this.colors().text).width('100%').margin({ bottom: 12 })
       Scroll() {
         Column() {
           this.fieldLabel('名称')
           TextInput({ text: this.editName, placeholder: '例如：东京 · 主节点' }).maxLength(48)
-            .fontColor('#000000').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+            .fontColor(this.colors().text).placeholderColor(this.colors().mutedText).backgroundColor(this.colors().input)
             .onChange((value: string) => { this.editName = value; }).height(48).borderRadius(6)
           this.fieldLabel('服务器地址')
           TextInput({ text: this.editHost, placeholder: '域名或 IP 地址' }).maxLength(253)
-            .fontColor('#000000').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+            .fontColor(this.colors().text).placeholderColor(this.colors().mutedText).backgroundColor(this.colors().input)
             .onChange((value: string) => { this.editHost = value; }).height(48).borderRadius(6)
           this.fieldLabel('端口')
           TextInput({ text: this.editPort, placeholder: '8388' }).type(InputType.Number).maxLength(5)
-            .fontColor('#000000').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+            .fontColor(this.colors().text).placeholderColor(this.colors().mutedText).backgroundColor(this.colors().input)
             .onChange((value: string) => { this.editPort = value; }).height(48).borderRadius(6)
           this.fieldLabel('加密方式')
           Select(CIPHERS.map((cipher: string): SelectOption => ({ value: cipher })))
             .selected(this.editMethod).value(CIPHERS[this.editMethod]).width('100%').height(48)
-            .fontColor('#000000').backgroundColor('#EDF2EE')
-            .optionFontColor('#000000').optionBgColor('#EDF2EE')
-            .selectedOptionFontColor('#000000').selectedOptionBgColor('#D8EADF')
+            .fontColor(this.colors().text).backgroundColor(this.colors().input)
+            .optionFontColor(this.colors().text).optionBgColor(this.colors().input)
+            .selectedOptionFontColor(this.colors().text).selectedOptionBgColor(this.colors().selectedInput)
             .onSelect((index: number) => { this.editMethod = index; })
           this.fieldLabel('密码')
           TextInput({ text: this.editPassword, placeholder: '服务器密码' }).type(InputType.Password)
-            .fontColor('#000000').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+            .fontColor(this.colors().text).placeholderColor(this.colors().mutedText).backgroundColor(this.colors().input)
             .onChange((value: string) => { this.editPassword = value; }).height(48).borderRadius(6)
           if (this.formError) {
-            Text(this.formError).fontSize(13).fontColor('#B42318').width('100%').margin({ top: 16 })
+            Text(this.formError).fontSize(13).fontColor(this.colors().danger).width('100%').margin({ top: 16 })
           }
         }.width('100%').padding({ bottom: 24 })
       }.layoutWeight(1).width('100%').align(Alignment.TopStart)
       Row({ space: 12 }) {
         Button('取消', { type: ButtonType.Normal }).layoutWeight(1).height(48).borderRadius(6)
-          .backgroundColor('#E7EDE9').fontColor('#182A23').enabled(!this.saving).onClick(() => this.closeEditor())
+          .backgroundColor(this.colors().secondaryButton).fontColor(this.colors().text)
+          .enabled(!this.saving).onClick(() => this.closeEditor())
         Button(this.saving ? '保存中' : '保存服务器', { type: ButtonType.Normal }).layoutWeight(2).height(48)
-          .borderRadius(6).backgroundColor('#147D59').enabled(!this.saving).onClick(() => this.saveServer())
+          .borderRadius(6).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+          .enabled(!this.saving).onClick(() => this.saveServer())
       }.padding({ top: 16 }).width('100%')
     }.width('100%').height('100%')
   }
@@ -519,9 +550,9 @@ struct Index {
   private importPage() {
     Column({ space: 16 }) {
       Row() {
-        Button('取消').backgroundColor('#E7EDE9').fontColor('#182A23')
+        Button('取消').backgroundColor(this.colors().secondaryButton).fontColor(this.colors().text)
           .enabled(!this.importingBusy).onClick(() => this.closeImport())
-        Text('导入服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#182A23')
+        Text('导入服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
           .layoutWeight(1).textAlign(TextAlign.End)
       }.width('100%')
       Row({ space: 12 }) {
@@ -538,21 +569,21 @@ struct Index {
         }.layoutWeight(1)
         Button({ type: ButtonType.Normal }) {
           Row({ space: 8 }) {
-            SymbolGlyph($r('sys.symbol.qrcode')).fontSize(20).fontColor(['#FFFFFF'])
-            Text('扫码').fontSize(16).fontColor('#FFFFFF')
+            SymbolGlyph($r('sys.symbol.qrcode')).fontSize(20).fontColor([this.colors().onAccent])
+            Text('扫码').fontSize(16).fontColor(this.colors().onAccent)
           }
-        }.height(44).layoutWeight(1).borderRadius(6).backgroundColor('#147D59')
+        }.height(44).layoutWeight(1).borderRadius(6).backgroundColor(this.colors().accent)
           .enabled(!this.importingBusy && this.canManageServers()).onClick(() => this.scanServer())
       }.width('100%')
       TextArea({ text: this.importText, placeholder: 'ss://' }).maxLength(8192)
-        .fontColor('#182A23').placeholderColor('#66736C').backgroundColor('#EDF2EE')
+        .fontColor(this.colors().text).placeholderColor(this.colors().mutedText).backgroundColor(this.colors().input)
         .layoutWeight(1).width('100%').enabled(!this.importingBusy)
         .onChange((value: string) => { this.importText = value; this.importError = ''; })
       if (this.importError) {
-        Text(this.importError).fontSize(13).fontColor('#B42318').width('100%')
+        Text(this.importError).fontSize(13).fontColor(this.colors().danger).width('100%')
       }
       Button('读取配置', { type: ButtonType.Normal }).width('100%').height(48)
-        .borderRadius(6).backgroundColor('#147D59')
+        .borderRadius(6).backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
         .enabled(!this.importingBusy && this.canManageServers() && this.importText.trim().length > 0)
         .onClick(() => this.importServer(this.importText))
     }.width('100%').height('100%')
@@ -562,14 +593,14 @@ struct Index {
   private sharePage() {
     Column({ space: 16 }) {
       Row() {
-        Button('返回').backgroundColor('#E7EDE9').fontColor('#182A23')
+        Button('返回').backgroundColor(this.colors().secondaryButton).fontColor(this.colors().text)
           .onClick(() => this.closeShare())
-        Text('分享服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor('#182A23')
+        Text('分享服务器').fontSize(20).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
           .layoutWeight(1).textAlign(TextAlign.End)
       }.width('100%')
       Scroll() {
         Column({ space: 16 }) {
-          Text(this.shareName).fontSize(18).fontWeight(FontWeight.Medium).fontColor('#182A23')
+          Text(this.shareName).fontSize(18).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
             .width('100%').maxLines(2).textOverflow({ overflow: TextOverflow.Ellipsis })
           if (this.shareLink.length <= 512) {
             Column() {
@@ -577,24 +608,24 @@ struct Index {
             }.width('100%').constraintSize({ maxWidth: 288 }).padding(16).backgroundColor('#FFFFFF')
               .accessibilityText('服务器配置二维码，包含密码')
           } else {
-            Text('链接过长，无法显示二维码').fontSize(14).fontColor('#B42318')
+            Text('链接过长，无法显示二维码').fontSize(14).fontColor(this.colors().danger)
           }
-          Text('包含服务器密码，请仅分享给可信的人').fontSize(13).fontColor('#B42318').width('100%')
+          Text('包含服务器密码，请仅分享给可信的人').fontSize(13).fontColor(this.colors().danger).width('100%')
         }.width('100%')
       }.layoutWeight(1).width('100%')
       if (this.shareStatus) {
-        Text(this.shareStatus).fontSize(13).fontColor('#52635D').width('100%')
+        Text(this.shareStatus).fontSize(13).fontColor(this.colors().secondaryText).width('100%')
       }
       Row({ space: 12 }) {
         Button('复制链接', { type: ButtonType.Normal }).height(48).layoutWeight(1).borderRadius(6)
-          .backgroundColor('#E7EDE9').fontColor('#182A23').enabled(!this.sharingBusy)
+          .backgroundColor(this.colors().secondaryButton).fontColor(this.colors().text).enabled(!this.sharingBusy)
           .onClick(() => this.copyServerLink())
         Button({ type: ButtonType.Normal }) {
           Row({ space: 8 }) {
-            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#FFFFFF'])
-            Text('分享').fontSize(16).fontColor('#FFFFFF')
+            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor([this.colors().onAccent])
+            Text('分享').fontSize(16).fontColor(this.colors().onAccent)
           }
-        }.height(48).layoutWeight(1).borderRadius(6).backgroundColor('#147D59')
+        }.height(48).layoutWeight(1).borderRadius(6).backgroundColor(this.colors().accent)
           .enabled(!this.sharingBusy).onClick(() => this.shareServerLink())
       }.width('100%')
     }.width('100%').height('100%')
@@ -604,24 +635,24 @@ struct Index {
   private serverRow(server: ServerProfile) {
     Row({ space: 8 }) {
       Radio({ value: server.id, group: 'servers' }).checked(server.id === this.selectedId)
-        .radioStyle({ checkedBackgroundColor: '#147D59' }).enabled(!this.requested && !this.busy)
+        .radioStyle({ checkedBackgroundColor: this.colors().accent }).enabled(!this.requested && !this.busy)
         .accessibilityText(`选择 ${server.name}`).onChange((checked: boolean) => { if (checked) { this.choose(server); } })
       Column({ space: 5 }) {
-        Text(server.name).fontSize(17).fontWeight(FontWeight.Medium).fontColor('#182A23')
+        Text(server.name).fontSize(17).fontWeight(FontWeight.Medium).fontColor(this.colors().text)
           .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-        Text(`${server.host}:${server.port}`).fontSize(13).fontColor('#52635D').maxLines(1)
+        Text(`${server.host}:${server.port}`).fontSize(13).fontColor(this.colors().secondaryText).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
-        Text(server.method).fontSize(11).fontColor('#78877F').width('100%')
+        Text(server.method).fontSize(11).fontColor(this.colors().mutedText).width('100%')
       }.layoutWeight(1).alignItems(HorizontalAlign.Start).onClick(() => this.choose(server))
       Column() {
         Row({ space: 4 }) {
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#52635D'])
+            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor([this.colors().secondaryText])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
             .accessibilityText(`分享 ${server.name}`).bindTips('分享服务器').enabled(!this.busy)
             .onClick(() => this.openShare(server))
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.plus_square_on_square')).fontSize(20).fontColor(['#52635D'])
+            SymbolGlyph($r('sys.symbol.plus_square_on_square')).fontSize(20).fontColor([this.colors().secondaryText])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
             .accessibilityText(`复制 ${server.name}`).bindTips('复制服务器配置')
             .enabled(this.canManageServers())
@@ -629,20 +660,20 @@ struct Index {
         }
         Row({ space: 4 }) {
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor(['#52635D'])
+            SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor([this.colors().secondaryText])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
             .accessibilityText(`编辑 ${server.name}`).enabled(this.canManageServers() && !this.serverInUse(server.id))
             .onClick(() => this.openEditor(server))
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.ohos_trash')).fontSize(20).fontColor(['#52635D'])
+            SymbolGlyph($r('sys.symbol.ohos_trash')).fontSize(20).fontColor([this.colors().secondaryText])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
             .accessibilityText(`删除 ${server.name}`).enabled(this.canManageServers() && !this.serverInUse(server.id))
             .onClick(() => this.confirmDelete(server))
         }
       }.width(84).height(88)
     }.width('100%').padding({ top: 18, bottom: 18, left: 6, right: 6 })
-      .backgroundColor(server.id === this.selectedId ? '#EDF6F1' : Color.Transparent)
-      .border({ width: { bottom: 1 }, color: '#E0E7E2' })
+      .backgroundColor(server.id === this.selectedId ? this.colors().selectedRow : Color.Transparent)
+      .border({ width: { bottom: 1 }, color: this.colors().border })
   }
 
   build() {
@@ -655,76 +686,86 @@ struct Index {
         this.editor()
       } else if (this.showLogs) {
         Row() {
-          Button('返回').onClick(() => { this.showLogs = false; }).backgroundColor('#147D59')
-          Text('诊断日志').fontSize(20).layoutWeight(1).textAlign(TextAlign.Center)
-          Button('刷新').onClick(() => this.refreshLogs()).backgroundColor('#147D59')
+          Button('返回').onClick(() => { this.showLogs = false; }).backgroundColor(this.colors().accent)
+            .fontColor(this.colors().onAccent)
+          Text('诊断日志').fontSize(20).fontColor(this.colors().text).layoutWeight(1).textAlign(TextAlign.Center)
+          Button('刷新').onClick(() => this.refreshLogs()).backgroundColor(this.colors().accent)
+            .fontColor(this.colors().onAccent)
         }.width('100%')
         Scroll() {
-          Text(this.logText).fontSize(12).fontColor('#34483D').width('100%').copyOption(CopyOptions.LocalDevice)
+          Text(this.logText).fontSize(12).fontColor(this.colors().secondaryText).width('100%')
+            .copyOption(CopyOptions.LocalDevice)
         }.layoutWeight(1).margin({ top: 20 }).align(Alignment.TopStart)
       } else {
         Row({ space: 10 }) {
-          SymbolGlyph($r('sys.symbol.ohos_lock')).fontSize(28).fontColor(['#147D59'])
-          Text('Shadowsocks').fontSize(26).fontWeight(FontWeight.Bold).fontColor('#182A23').layoutWeight(1)
+          SymbolGlyph($r('sys.symbol.ohos_lock')).fontSize(28).fontColor([this.colors().accent])
+          Text('Shadowsocks').fontSize(26).fontWeight(FontWeight.Bold).fontColor(this.colors().text).layoutWeight(1)
+          Button(this.themeMode === 'dark' ? '浅色' : '深色', { type: ButtonType.Normal })
+            .height(40).borderRadius(6).backgroundColor(this.colors().secondaryButton).fontColor(this.colors().text)
+            .accessibilityText(this.themeMode === 'dark' ? '切换到浅色主题' : '切换到深色主题')
+            .onClick(() => this.toggleTheme())
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.doc_plaintext_fill_1')).fontSize(22).fontColor(['#52635D'])
+            SymbolGlyph($r('sys.symbol.doc_plaintext_fill_1')).fontSize(22).fontColor([this.colors().secondaryText])
           }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('诊断日志')
             .onClick(() => { this.refreshLogs(); this.showLogs = true; })
         }.width('100%')
         Row({ space: 8 }) {
-          Row().width(8).height(8).borderRadius(4).backgroundColor(this.connected ? '#147D59' : '#91A199')
-          Text(this.status).fontSize(14).fontColor(this.connected ? '#147D59' : '#52635D')
+          Row().width(8).height(8).borderRadius(4)
+            .backgroundColor(this.connected ? this.colors().accent : this.colors().inactive)
+          Text(this.status).fontSize(14)
+            .fontColor(this.connected ? this.colors().accent : this.colors().secondaryText)
           Blank()
-          Text('VPN').fontSize(12).fontWeight(FontWeight.Bold).fontColor('#78877F')
+          Text('VPN').fontSize(12).fontWeight(FontWeight.Bold).fontColor(this.colors().mutedText)
         }.width('100%').margin({ top: 24, bottom: 24 })
-        Divider().color('#DCE5DF')
+        Divider().color(this.colors().border)
         Row({ space: 8 }) {
-          Text('代理模式').fontSize(14).fontColor('#52635D')
+          Text('代理模式').fontSize(14).fontColor(this.colors().secondaryText)
           Select([{ value: '全局' }, { value: 'GFWList' }])
             .selected(this.routeMode === 'gfwlist' ? 1 : 0)
             .value(this.routeMode === 'gfwlist' ? 'GFWList' : '全局')
             .height(44).layoutWeight(1)
-            .fontColor('#182A23').backgroundColor('#EDF2EE')
-            .optionFontColor('#182A23').optionBgColor('#EDF2EE')
-            .selectedOptionFontColor('#182A23').selectedOptionBgColor('#D8EADF')
+            .fontColor(this.colors().text).backgroundColor(this.colors().input)
+            .optionFontColor(this.colors().text).optionBgColor(this.colors().input)
+            .selectedOptionFontColor(this.colors().text).selectedOptionBgColor(this.colors().selectedInput)
             .accessibilityText('代理模式')
             .enabled(this.ready && !this.busy && !this.requested && !this.updatingRules)
             .onSelect((index: number) => { this.changeRoute(index === 1 ? 'gfwlist' : 'global'); })
         }.width('100%').margin({ top: 12 })
         if (this.requested) {
-          Text('断开后可切换').fontSize(12).fontColor('#52635D').width('100%').margin({ top: 4 })
+          Text('断开后可切换').fontSize(12).fontColor(this.colors().secondaryText).width('100%').margin({ top: 4 })
         }
         if (this.routeMode === 'gfwlist') {
           Row({ space: 8 }) {
             Text(this.updatingRules ? '正在更新 GFWList' : this.rulesStatus)
-              .fontSize(12).fontColor('#52635D').layoutWeight(1).maxLines(2)
+              .fontSize(12).fontColor(this.colors().secondaryText).layoutWeight(1).maxLines(2)
             Button({ type: ButtonType.Normal }) {
-              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(22).fontColor(['#147D59'])
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(22).fontColor([this.colors().accent])
             }.width(44).height(44).backgroundColor(Color.Transparent)
               .accessibilityText('更新 GFWList').bindTips('更新 GFWList')
               .enabled(this.ready && !this.busy && !this.updatingRules).onClick(() => this.updateRules())
           }.width('100%')
         }
         Row() {
-          Text('服务器').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#182A23')
-          Text(`${this.servers.length}`).fontSize(13).fontColor('#78877F').margin({ left: 8 })
+          Text('服务器').fontSize(18).fontWeight(FontWeight.Bold).fontColor(this.colors().text)
+          Text(`${this.servers.length}`).fontSize(13).fontColor(this.colors().mutedText).margin({ left: 8 })
           Blank()
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.arrow_down_circle')).fontSize(23).fontColor(['#147D59'])
+            SymbolGlyph($r('sys.symbol.arrow_down_circle')).fontSize(23).fontColor([this.colors().accent])
           }.width(44).height(44).backgroundColor(Color.Transparent)
             .accessibilityText('导入服务器').bindTips('导入服务器')
             .enabled(this.canManageServers()).onClick(() => this.openImport())
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.plus')).fontSize(23).fontColor(['#147D59'])
+            SymbolGlyph($r('sys.symbol.plus')).fontSize(23).fontColor([this.colors().accent])
           }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('添加服务器')
             .enabled(this.canManageServers()).onClick(() => this.openEditor())
         }.width('100%').margin({ top: 16, bottom: 8 })
         if (!this.servers.length) {
           Column({ space: 16 }) {
-            SymbolGlyph($r('sys.symbol.network_acceleration')).fontSize(44).fontColor(['#91A199'])
-            Text(this.ready ? '暂无服务器' : '正在读取配置').fontSize(16).fontColor('#52635D')
+            SymbolGlyph($r('sys.symbol.network_acceleration')).fontSize(44).fontColor([this.colors().inactive])
+            Text(this.ready ? '暂无服务器' : '正在读取配置').fontSize(16).fontColor(this.colors().secondaryText)
             if (this.ready) {
-              Button('添加服务器').backgroundColor('#147D59').onClick(() => this.openEditor())
+              Button('添加服务器').backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
+                .onClick(() => this.openEditor())
             }
           }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
         } else {
@@ -735,20 +776,21 @@ struct Index {
           }.width('100%').layoutWeight(1)
         }
         if (this.error) {
-          Text(this.error).fontSize(13).fontColor('#B42318').width('100%').maxLines(3)
+          Text(this.error).fontSize(13).fontColor(this.colors().danger).width('100%').maxLines(3)
             .textOverflow({ overflow: TextOverflow.Ellipsis }).margin({ top: 12 })
         }
         Column({ space: 12 }) {
-          Text(this.selected()?.name ?? '未选择服务器').fontSize(14).fontColor('#52635D')
+          Text(this.selected()?.name ?? '未选择服务器').fontSize(14).fontColor(this.colors().secondaryText)
             .maxLines(1).textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
           Button(this.requested ? (this.connected ? '断开连接' : '取消连接') : '连接', { type: ButtonType.Normal })
             .width('100%').height(52).borderRadius(6).fontSize(17).fontWeight(FontWeight.Medium)
-            .backgroundColor(this.requested ? '#34483D' : '#147D59')
+            .backgroundColor(this.requested ? this.colors().disconnect : this.colors().accent)
+            .fontColor(this.colors().onAccent)
             .enabled(this.ready && !this.busy && !this.updatingRules && (this.requested || this.selected() !== undefined))
             .onClick(() => this.toggleVpn())
         }.width('100%').padding({ top: 20 }).margin({ top: 12 })
       }
     }.width('100%').height('100%').padding({ left: 24, right: 24, top: 20, bottom: 20 })
-      .backgroundColor('#F7FAF8')
+      .backgroundColor(this.colors().background)
   }
 }

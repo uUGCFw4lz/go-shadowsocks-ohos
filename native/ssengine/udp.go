@@ -177,15 +177,20 @@ func udpSocksLocal(laddr, server string, shadow func(net.PacketConn) net.PacketC
 	}
 	defer c.Close()
 
+	serveUDPSocksLocal(c, srvAddr, shadow)
+}
+
+func serveUDPSocksLocal(c *net.UDPConn, srvAddr net.Addr, shadow func(net.PacketConn) net.PacketConn) {
 	nm := newNATmap(config.UDPTimeout)
 	buf := make([]byte, udpBufSize)
 	router := &udpRouter{sessions: make(map[string]*udpRouteSession)}
+	dnsSlots := make(chan struct{}, 64)
 
 	for {
 		n, raddr, err := c.ReadFromUDPAddrPort(buf)
 		if err != nil {
 			logf("UDP local read error: %v", err)
-			continue
+			return
 		}
 
 		if n < 4 || buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
@@ -195,7 +200,28 @@ func udpSocksLocal(laddr, server string, shadow func(net.PacketConn) net.PacketC
 		if header == nil {
 			continue
 		}
-		host, _, _ := net.SplitHostPort(header.String())
+		host, port, _ := net.SplitHostPort(header.String())
+		if port == "53" {
+			select {
+			case dnsSlots <- struct{}{}:
+			default:
+				continue
+			}
+			query := append([]byte(nil), buf[3+len(header):n]...)
+			responseHeader := append([]byte{0, 0, 0}, header...)
+			go func() {
+				defer func() { <-dnsSlots }()
+				response, err := routingDNS("127.0.0.1:8053", query)
+				if err != nil {
+					logf("SOCKS DNS exchange: %v", err)
+					return
+				}
+				if _, err := c.WriteToUDPAddrPort(append(responseHeader, response...), raddr); err != nil {
+					logf("SOCKS DNS reply: %v", err)
+				}
+			}()
+			continue
+		}
 		ip, _ := netip.ParseAddr(host)
 		if routingEnabled() || (ip.IsValid() && fakeNetwork.Contains(ip)) {
 			if err := router.send(c, raddr, buf[:n], srvAddr, shadow); err != nil {
@@ -210,7 +236,7 @@ func udpSocksLocal(laddr, server string, shadow func(net.PacketConn) net.PacketC
 				logf("UDP local listen error: %v", err)
 				continue
 			}
-			logf("UDP socks tunnel %s <-> %s <-> %s", laddr, server, socks.Addr(buf[3:]))
+			logf("UDP socks tunnel %s <-> %s <-> %s", c.LocalAddr(), srvAddr, header)
 			pc = shadow(pc)
 			nm.Add(raddr, c, pc, socksClient)
 		}

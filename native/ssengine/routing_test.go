@@ -3,15 +3,103 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
 	"github.com/shadowsocks/go-shadowsocks2/socks"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestFakeIPPersistenceDoesNotBlockExistingRoutes(t *testing.T) {
+	previous := routes
+	defer func() { routes = previous }()
+	rules, err := parseDomainRules([]byte("[AutoProxy 0.2.9]\n||blocked.test"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	table := &routeTable{
+		rules: rules, domains: map[string]string{"blocked.test": "198.18.0.1"},
+		hosts: map[string]string{"198.18.0.1": "blocked.test"},
+		path:  filepath.Join(t.TempDir(), "fake-ip.json"),
+	}
+	for index := 0; index < 20000; index++ {
+		domain := fmt.Sprintf("%d.%s.blocked.test", index, strings.Repeat("a", 60))
+		address := fmt.Sprintf("198.19.%d.%d", index/256, index%256)
+		table.domains[domain] = address
+		table.hosts[address] = domain
+	}
+	routes = table
+	if err := syscall.Mkfifo(table.path+".tmp", 0600); err != nil {
+		t.Fatal(err)
+	}
+	allocated := make(chan error, 1)
+	go func() {
+		_, err := table.fakeIP("new.blocked.test")
+		allocated <- err
+	}()
+	reader, err := os.Open(table.path + ".tmp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	routed := make(chan error, 1)
+	go func() {
+		target, proxy, err := routeDestination("198.18.0.1:443")
+		if err == nil && (target != "blocked.test:443" || !proxy) {
+			err = fmt.Errorf("unexpected route: %s, proxy=%t", target, proxy)
+		}
+		if err == nil {
+			address, lookupErr := table.fakeIP("blocked.test")
+			err = lookupErr
+			if err == nil && address.String() != "198.18.0.1" {
+				err = fmt.Errorf("cached address changed: %s", address)
+			}
+		}
+		routed <- err
+	}()
+	completed := false
+	select {
+	case err := <-routed:
+		completed = true
+		if err != nil {
+			t.Error(err)
+		}
+	case <-time.After(time.Second):
+		t.Error("existing route blocked by fake IP persistence")
+	}
+	io.Copy(io.Discard, reader)
+	if err := <-allocated; err != nil {
+		t.Error(err)
+	}
+	if !completed {
+		<-routed
+	}
+}
+
+func TestFakeIPFailedPersistenceDoesNotPublishMapping(t *testing.T) {
+	table := &routeTable{domains: make(map[string]string), hosts: make(map[string]string),
+		path: filepath.Join(t.TempDir(), "missing", "fake-ip.json")}
+	if _, err := table.fakeIP("blocked.test"); err == nil {
+		t.Fatal("expected persistence failure")
+	}
+	if len(table.domains) != 0 || len(table.hosts) != 0 {
+		t.Fatal("failed write published a mapping")
+	}
+	if err := os.Mkdir(filepath.Dir(table.path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	address, err := table.fakeIP("blocked.test")
+	if err != nil || address.String() != "198.18.0.1" {
+		t.Fatalf("retry failed: %s, %v", address, err)
+	}
+}
 
 func TestRoutingConfigurationAndPersistence(t *testing.T) {
 	previous := routes
@@ -49,6 +137,9 @@ func TestRoutingConfigurationAndPersistence(t *testing.T) {
 		t.Fatal("persisted mapping lost")
 	}
 	writeJSON(listPath, map[string]string{"content": "not a list"})
+	if target, proxy, err := routeDestination(address.String() + ":443"); err != nil || !proxy || target != "blocked.test:443" {
+		t.Fatal("routing re-read the list instead of using memory")
+	}
 	if err := configureRouting(configPath); err == nil {
 		t.Fatal("invalid list accepted")
 	}
@@ -143,6 +234,76 @@ func TestTCPDirectAndProxy(t *testing.T) {
 	header, err := socks.ReadAddr(accepted)
 	if err != nil || header.String() != "blocked.test:443" {
 		t.Fatalf("proxy header %v: %v", header, err)
+	}
+}
+
+func TestUnknownPublicIPTimeoutFallsBackToProxy(t *testing.T) {
+	previousRoutes, previousDial := routes, dialRouteTCP
+	defer func() { routes, dialRouteTCP = previousRoutes, previousDial }()
+	rules, err := parseDomainRules([]byte("[AutoProxy 0.2.9]\n||google.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes = &routeTable{rules: rules, domains: make(map[string]string), hosts: make(map[string]string)}
+	for _, testCase := range []struct {
+		target   string
+		err      error
+		fallback bool
+	}{
+		{"142.251.154.119:443", nil, false},
+		{"142.251.154.119:443", os.ErrDeadlineExceeded, true},
+		{"192.168.1.1:443", os.ErrDeadlineExceeded, false},
+		{"127.0.0.1:443", os.ErrDeadlineExceeded, false},
+		{"direct.test:443", os.ErrDeadlineExceeded, false},
+		{"142.251.154.119:443", syscall.ECONNREFUSED, false},
+	} {
+		t.Run(fmt.Sprintf("%s/%v", testCase.target, testCase.err), func(t *testing.T) {
+			calls := 0
+			client, server := net.Pipe()
+			defer client.Close()
+			defer server.Close()
+			server.SetReadDeadline(time.Now().Add(time.Second))
+			headerRead := make(chan error, 1)
+			if testCase.fallback {
+				go func() {
+					header, err := socks.ReadAddr(server)
+					if err == nil && header.String() != testCase.target {
+						err = fmt.Errorf("fallback changed destination: %s", header)
+					}
+					headerRead <- err
+				}()
+			}
+			dialRouteTCP = func(network, address string, timeout time.Duration) (net.Conn, error) {
+				calls++
+				if calls == 1 {
+					if address != testCase.target || (testCase.fallback && timeout != 1500*time.Millisecond) {
+						t.Errorf("unexpected direct dial %s %s", address, timeout)
+					}
+					if testCase.err == nil {
+						return client, nil
+					}
+					return nil, testCase.err
+				}
+				if address != "proxy.test:8388" {
+					t.Errorf("unexpected proxy %s", address)
+				}
+				return client, nil
+			}
+			connection, err := dialTCPDestination(socks.ParseAddr(testCase.target), "proxy.test:8388", func(connection net.Conn) net.Conn { return connection }, true)
+			if testCase.fallback {
+				if err != nil || calls != 2 || connection == nil {
+					t.Fatalf("fallback failed: calls=%d error=%v", calls, err)
+				}
+				if err := <-headerRead; err != nil {
+					t.Fatal(err)
+				}
+			} else if calls != 1 || err != testCase.err {
+				t.Fatalf("direct-only route changed: calls=%d error=%v", calls, err)
+			}
+			if testCase.err == nil && connection != client {
+				t.Fatal("successful direct connection was replaced")
+			}
+		})
 	}
 }
 
@@ -262,5 +423,74 @@ func TestFakeDNSAndRouting(t *testing.T) {
 	routes.rules = nil
 	if target, proxy, err := routeDestination(address.String() + ":443"); err != nil || !proxy || target != "www.blocked.test:443" {
 		t.Fatal("global mode lost cached fake IP")
+	}
+}
+
+func TestSOCKSDNSMultipleQueriesOnSameSocket(t *testing.T) {
+	previous := routes
+	rules, err := parseDomainRules([]byte("[AutoProxy 0.2.9]\n||google.com"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes = &routeTable{rules: rules, domains: make(map[string]string), hosts: make(map[string]string)}
+	defer func() { routes = previous }()
+	listener, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		serveUDPSocksLocal(listener, nil, func(connection net.PacketConn) net.PacketConn { return connection })
+	}()
+	defer func() {
+		listener.Close()
+		<-finished
+	}()
+	client, err := net.DialUDP("udp", nil, listener.LocalAddr().(*net.UDPAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	client.SetDeadline(time.Now().Add(3 * time.Second))
+	header := append([]byte{0, 0, 0}, socks.ParseAddr("8.8.8.8:53")...)
+	types := []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.Type(65)}
+	for round := 0; round < 2; round++ {
+		for index, queryType := range types {
+			query := dnsmessage.Message{
+				Header:    dnsmessage.Header{ID: uint16(round*len(types) + index + 1)},
+				Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName("www.google.com."), Type: queryType, Class: dnsmessage.ClassINET}},
+			}
+			packet, err := query.Pack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := client.Write(append(append([]byte(nil), header...), packet...)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		seen := make(map[uint16]bool)
+		for range types {
+			buffer := make([]byte, 4096)
+			length, err := client.Read(buffer)
+			if err != nil {
+				t.Fatal("DNS query lost on reused UDP socket:", err)
+			}
+			if length < len(header) || !bytes.Equal(buffer[:len(header)], header) {
+				t.Fatal("DNS response lost original SOCKS address")
+			}
+			var response dnsmessage.Message
+			if err := response.Unpack(buffer[len(header):length]); err != nil {
+				t.Fatal(err)
+			}
+			index := int(response.ID) - round*len(types) - 1
+			if index < 0 || index >= len(types) || seen[response.ID] || !response.Response || len(response.Questions) != 1 {
+				t.Fatal("invalid DNS transaction")
+			}
+			seen[response.ID] = true
+			if response.Questions[0].Type != types[index] || (types[index] == dnsmessage.TypeA) != (len(response.Answers) == 1) {
+				t.Fatal("invalid split DNS answer")
+			}
+		}
 	}
 }

@@ -1,9 +1,15 @@
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
 import { CIPHERS, ServerProfile, serverUrl, validateServer } from '../main/ets/model/ServerStore';
 import { parseGfwList } from '../main/ets/model/RoutingStore';
+import { normalizeTheme } from '../main/ets/model/ThemeStore';
 
 export default function localUnitTest() {
   describe('localUnitTest', () => {
+    it('normalizesThemePreference', 0, () => {
+      expect(normalizeTheme('dark')).assertEqual('dark');
+      expect(normalizeTheme('light')).assertEqual('light');
+      expect(normalizeTheme('invalid')).assertEqual('light');
+    });
     it('normalizesGfwDomainRules', 0, () => {
       const rules = parseGfwList('[AutoProxy 0.2.9]\n||example.com\n.example.com\n@@||safe.example.com\n|https://blocked.test/path\n/regex.*/\n@@https://blocked.test/safe');
       expect(rules.domainCount).assertEqual(2);

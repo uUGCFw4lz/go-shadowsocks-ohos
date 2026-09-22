@@ -6,12 +6,15 @@ import (
 	"io"
 	"io/ioutil"
 	"net"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
 
 	"github.com/shadowsocks/go-shadowsocks2/socks"
 )
+
+var dialRouteTCP = net.DialTimeout
 
 // Create a SOCKS server listening on addr and proxy to server.
 func socksLocal(addr, server string, shadow func(net.Conn) net.Conn) {
@@ -101,9 +104,24 @@ func dialTCPDestination(target socks.Addr, server string, shadow func(net.Conn) 
 	}
 	if !proxy {
 		logf("route TCP direct %s", destination)
-		return net.DialTimeout("tcp", destination, 10*time.Second)
+		host, _, _ := net.SplitHostPort(destination)
+		address, parseErr := netip.ParseAddr(host)
+		fallback := parseErr == nil && address.IsGlobalUnicast() && !address.IsPrivate()
+		timeout := 10 * time.Second
+		if fallback {
+			timeout = 1500 * time.Millisecond
+		}
+		connection, err := dialRouteTCP("tcp", destination, timeout)
+		if err == nil || !fallback {
+			return connection, err
+		}
+		var networkError net.Error
+		if !errors.As(err, &networkError) || !networkError.Timeout() {
+			return nil, err
+		}
+		logf("route TCP direct timeout, retry proxy %s", destination)
 	}
-	connection, err := net.DialTimeout("tcp", server, 10*time.Second)
+	connection, err := dialRouteTCP("tcp", server, 10*time.Second)
 	if err != nil {
 		return nil, err
 	}
