@@ -4,7 +4,7 @@ go 1.24.1
 
 require (
 	github.com/uUGCFw4lz/go-tun2socks v0.0.0
-	github.com/shadowsocks/go-shadowsocks2 v0.1.5
+	github.com/uUGCFw4lz/go-shadowsocks2 v0.1.6
 )
 
 require (
@@ -21,3 +21,6 @@ require (
 	golang.zx2c4.com/wireguard/windows v0.5.3 // indirect
 	gvisor.dev/gvisor v0.0.0-20250828211149-1f30edfbb5d4 // indirect
 )
+
+// replace github.com/dosgo/go-tun2socks => /Users/go/go-tun2socks
+// replace github.com/shadowsocks/go-shadowsocks2 => /Users/go/go-shadowsocks2
