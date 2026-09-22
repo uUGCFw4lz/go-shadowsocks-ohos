@@ -3,6 +3,7 @@ import { vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { appendLog, writeConnectionState } from '../model/AppLog';
+import { RoutingStore } from '../model/RoutingStore';
 import {
   DEFAULT_SS_URL,
   DNS_TUN_PORT,
@@ -22,6 +23,7 @@ export default class VpnExtAbility extends VpnExtensionAbility {
   private tunFd: number = -1;
   private ssUrl: string = DEFAULT_SS_URL;
   private serverId: string = '';
+  private routeMode: string = 'global';
   private phase: string = 'connecting';
   private heartbeat: number = -1;
 
@@ -30,6 +32,7 @@ export default class VpnExtAbility extends VpnExtensionAbility {
     appendLog(this.context, 'VpnExtAbility onCreate');
     const selectedId = want.parameters?.serverId;
     this.serverId = typeof selectedId === 'string' ? selectedId : '';
+    this.routeMode = want.parameters?.routeMode === 'gfwlist' ? 'gfwlist' : 'global';
     writeConnectionState(this.context, this.phase, this.serverId);
     this.heartbeat = setInterval(() => writeConnectionState(this.context, this.phase, this.serverId), 1000);
     const param = want.parameters?.ssUrl;
@@ -65,6 +68,9 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       await this.vpnConnection.protectProcessNet();
       appendLog(this.context, 'protectProcessNet ok');
     } catch (err) {
+      if (this.routeMode === 'gfwlist') {
+        throw new Error('GFWList 分流需要成功保护 VPN 出站套接字');
+      }
       appendLog(this.context, `protectProcessNet skipped: ${JSON.stringify(err)}`);
     }
 
@@ -110,7 +116,9 @@ export default class VpnExtAbility extends VpnExtensionAbility {
     const socksAddr = `${SOCKS_HOST}:${SOCKS_PORT}`;
     const dnsTun =
       `127.0.0.1:${DNS_TUN_PORT}=8.8.8.8:53,127.0.0.1:${DNS_TUN_PORT2}=8.8.4.4:53`;
-    native.startSsClient(this.ssUrl, socksAddr, dnsTun, dnsTun, `${logDir}/ss.log`);
+    const routePath = RoutingStore.prepare(this.context, this.routeMode);
+    native.startSsClient(this.ssUrl, socksAddr, dnsTun, dnsTun, `${logDir}/ss.log`, routePath);
+    appendLog(this.context, `route mode=${this.routeMode}`);
     appendLog(this.context, `ss client started in-process socks=${socksAddr}`);
 
     const socksReady = native.waitPort(SOCKS_HOST, SOCKS_PORT, 8000);

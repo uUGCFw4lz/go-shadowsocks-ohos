@@ -21,7 +21,8 @@ fi
 
 cd "$ROOT"
 GOOS="$("$HOST_GO" env GOHOSTOS)" GOARCH="$("$HOST_GO" env GOHOSTARCH)" CGO_ENABLED=0 \
-  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go client_test.go udp_test.go
+  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go rules.go routing.go routing_udp.go \
+    client_test.go udp_test.go rules_test.go routing_test.go
 
 export CGO_ENABLED=1
 export GOOS=openharmony

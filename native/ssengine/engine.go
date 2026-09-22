@@ -36,6 +36,14 @@ func SsSetLogPath(path *C.char) C.int {
 	return 0
 }
 
+//export SsConfigureRouting
+func SsConfigureRouting(path *C.char, errBuf *C.char, errBufLen C.int) C.int {
+	if err := configureRouting(C.GoString(path)); err != nil {
+		return writeErr(errBuf, errBufLen, err.Error())
+	}
+	return 0
+}
+
 //export SsStartClient
 func SsStartClient(ssURL, socksAddr, udpTun, tcpTun *C.char, verbose C.int, errBuf *C.char, errBufLen C.int) C.int {
 	err := startShadowsocksClient(

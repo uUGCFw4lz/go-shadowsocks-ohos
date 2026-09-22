@@ -16,7 +16,7 @@ import (
 // Create a SOCKS server listening on addr and proxy to server.
 func socksLocal(addr, server string, shadow func(net.Conn) net.Conn) {
 	logf("SOCKS proxy %s <-> %s", addr, server)
-	tcpLocal(addr, server, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) })
+	tcpLocal(addr, server, shadow, func(c net.Conn) (socks.Addr, error) { return socks.Handshake(c) }, true)
 }
 
 // Create a TCP tunnel from addr to target via server.
@@ -27,11 +27,11 @@ func tcpTun(addr, server, target string, shadow func(net.Conn) net.Conn) {
 		return
 	}
 	logf("TCP tunnel %s <-> %s <-> %s", addr, server, target)
-	tcpLocal(addr, server, shadow, func(net.Conn) (socks.Addr, error) { return tgt, nil })
+	tcpLocal(addr, server, shadow, func(net.Conn) (socks.Addr, error) { return tgt, nil }, false)
 }
 
 // Listen on addr and proxy to server to reach target from getAddr.
-func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(net.Conn) (socks.Addr, error)) {
+func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(net.Conn) (socks.Addr, error), routed bool) {
 	l, err := net.Listen("tcp", addr)
 	if err != nil {
 		logf("failed to listen on %s: %v", addr, err)
@@ -68,28 +68,57 @@ func tcpLocal(addr, server string, shadow func(net.Conn) net.Conn, getAddr func(
 				return
 			}
 
-			rc, err := net.Dial("tcp", server)
+			if routed && routingEnabled() {
+				_, port, _ := net.SplitHostPort(tgt.String())
+				if port == "53" {
+					serveRoutingDNS(c)
+					return
+				}
+			}
+			rc, err := dialTCPDestination(tgt, server, shadow, routed)
 			if err != nil {
-				logf("failed to connect to server %v: %v", server, err)
+				logf("failed to connect to target: %v", err)
 				return
 			}
 			defer rc.Close()
-			if config.TCPCork {
-				rc = timedCork(rc, 10*time.Millisecond, 1280)
-			}
-			rc = shadow(rc)
 
-			if _, err = rc.Write(tgt); err != nil {
-				logf("failed to send target address: %v", err)
-				return
-			}
-
-			logf("proxy %s <-> %s <-> %s", c.RemoteAddr(), server, tgt)
+			logf("TCP relay %s <-> %s", c.RemoteAddr(), tgt)
 			if err = relay(rc, c); err != nil {
 				logf("relay error: %v", err)
 			}
 		}()
 	}
+}
+
+func dialTCPDestination(target socks.Addr, server string, shadow func(net.Conn) net.Conn, routed bool) (net.Conn, error) {
+	destination, proxy := target.String(), true
+	if routed {
+		var err error
+		destination, proxy, err = routeDestination(destination)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if !proxy {
+		logf("route TCP direct %s", destination)
+		return net.DialTimeout("tcp", destination, 10*time.Second)
+	}
+	connection, err := net.DialTimeout("tcp", server, 10*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if config.TCPCork {
+		connection = timedCork(connection, 10*time.Millisecond, 1280)
+	}
+	connection = shadow(connection)
+	connection.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	if _, err := connection.Write(socks.ParseAddr(destination)); err != nil {
+		connection.Close()
+		return nil, err
+	}
+	connection.SetWriteDeadline(time.Time{})
+	logf("route TCP proxy %s", destination)
+	return connection, nil
 }
 
 // Listen on addr for incoming connections.

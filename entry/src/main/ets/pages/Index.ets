@@ -3,6 +3,7 @@ import { vpnExtension } from '@kit.NetworkKit';
 import { BUNDLE_NAME, VPN_ABILITY } from '../model/SsConfig';
 import { readLog, readConnectionState } from '../model/AppLog';
 import { CIPHERS, ServerProfile, ServerStore, serverUrl, validateServer } from '../model/ServerStore';
+import { RoutingStore } from '../model/RoutingStore';
 
 @Entry
 @Component
@@ -26,6 +27,10 @@ struct Index {
   @State editPassword: string = '';
   @State formError: string = '';
   @State saving: boolean = false;
+  @State routeMode: string = 'global';
+  @State updatingRules: boolean = false;
+  @State rulesStatus: string = '尚未下载 GFWList';
+  @State rulesReady: boolean = false;
   private observer: vpnExtension.VpnObserver | undefined = undefined;
   private timer: number = -1;
   private requestTime: number = 0;
@@ -79,6 +84,8 @@ struct Index {
 
   private async loadServers(): Promise<void> {
     try {
+      this.routeMode = await RoutingStore.mode(this.context());
+      this.refreshRules();
       const settings = await ServerStore.load(this.context());
       this.servers = settings.servers;
       this.selectedId = this.servers.some((server: ServerProfile) => server.id === settings.selectedId) ?
@@ -91,6 +98,47 @@ struct Index {
 
   private selected(): ServerProfile | undefined {
     return this.servers.find((server: ServerProfile) => server.id === this.selectedId);
+  }
+
+  private refreshRules(): void {
+    const snapshot = RoutingStore.snapshot(this.context());
+    this.rulesReady = snapshot !== undefined;
+    this.rulesStatus = snapshot ? `${snapshot.domainCount} 域名 · ${snapshot.exceptionCount} 例外 · 跳过 ${snapshot.skipped}\n${new Date(snapshot.updatedAt).toLocaleString()}` : '尚未下载 GFWList';
+  }
+
+  private async changeRoute(mode: string): Promise<void> {
+    if (!this.ready || this.requested || this.busy || this.updatingRules || mode === this.routeMode) {
+      return;
+    }
+    this.busy = true;
+    try {
+      await RoutingStore.saveMode(this.context(), mode);
+      this.routeMode = mode;
+      this.error = '';
+    } catch (_) {
+      this.error = '路由模式保存失败';
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  private async updateRules(): Promise<void> {
+    if (this.updatingRules || this.busy) {
+      return;
+    }
+    this.updatingRules = true;
+    this.error = '';
+    try {
+      await RoutingStore.update(this.context());
+      this.refreshRules();
+      if (this.requested) {
+        this.rulesStatus += ' · 下次连接生效';
+      }
+    } catch (_) {
+      this.error = 'GFWList 更新失败，原有规则未更改';
+    } finally {
+      this.updatingRules = false;
+    }
   }
 
   private pollStatus(): void {
@@ -195,7 +243,7 @@ struct Index {
   }
 
   private async toggleVpn(): Promise<void> {
-    if (this.busy) {
+    if (this.busy || this.updatingRules) {
       return;
     }
     const server = this.selected();
@@ -210,6 +258,10 @@ struct Index {
         this.connected = false;
         this.status = '未连接';
       } else if (server) {
+        if (this.routeMode === 'gfwlist' && !this.rulesReady) {
+          this.error = '请先更新 GFWList';
+          return;
+        }
         const invalid = validateServer(server);
         if (invalid) {
           this.error = invalid;
@@ -219,7 +271,7 @@ struct Index {
         if (readConnectionState(this.context()).phase === 'failed') {
           await vpnExtension.stopVpnExtensionAbility(want);
         }
-        want.parameters = { ssUrl: serverUrl(server), serverId: server.id };
+        want.parameters = { ssUrl: serverUrl(server), serverId: server.id, routeMode: this.routeMode };
         await vpnExtension.startVpnExtensionAbility(want);
         this.requested = true;
         this.status = '正在连接';
@@ -343,6 +395,31 @@ struct Index {
           Text('VPN').fontSize(12).fontWeight(FontWeight.Bold).fontColor('#78877F')
         }.width('100%').margin({ top: 24, bottom: 24 })
         Divider().color('#DCE5DF')
+        Row({ space: 8 }) {
+          Text('代理模式').fontSize(14).fontColor('#52635D')
+          Select([{ value: '全局' }, { value: 'GFWList' }])
+            .selected(this.routeMode === 'gfwlist' ? 1 : 0)
+            .value(this.routeMode === 'gfwlist' ? 'GFWList' : '全局')
+            .height(44).layoutWeight(1)
+            .fontColor('#182A23').backgroundColor('#EDF2EE')
+            .optionFontColor('#182A23').optionBgColor('#EDF2EE')
+            .selectedOptionFontColor('#182A23').selectedOptionBgColor('#D8EADF')
+            .accessibilityText('代理模式')
+            .enabled(this.ready && !this.busy && !this.requested && !this.updatingRules)
+            .onSelect((index: number) => { this.changeRoute(index === 1 ? 'gfwlist' : 'global'); })
+        }.width('100%').margin({ top: 12 })
+        if (this.requested) {
+          Text('断开后可切换').fontSize(12).fontColor('#52635D').width('100%').margin({ top: 4 })
+        }
+        Row({ space: 8 }) {
+          Text(this.updatingRules ? '正在更新 GFWList' : this.rulesStatus)
+            .fontSize(12).fontColor('#52635D').layoutWeight(1).maxLines(2)
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(22).fontColor(['#147D59'])
+          }.width(44).height(44).backgroundColor(Color.Transparent)
+            .accessibilityText('更新 GFWList').bindTips('更新 GFWList')
+            .enabled(this.ready && !this.busy && !this.updatingRules).onClick(() => this.updateRules())
+        }.width('100%')
         Row() {
           Text('服务器').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#182A23')
           Text(`${this.servers.length}`).fontSize(13).fontColor('#78877F').margin({ left: 8 })
@@ -377,7 +454,7 @@ struct Index {
           Button(this.requested ? (this.connected ? '断开连接' : '取消连接') : '连接', { type: ButtonType.Normal })
             .width('100%').height(52).borderRadius(6).fontSize(17).fontWeight(FontWeight.Medium)
             .backgroundColor(this.requested ? '#34483D' : '#147D59')
-            .enabled(this.ready && !this.busy && (this.requested || this.selected() !== undefined))
+            .enabled(this.ready && !this.busy && !this.updatingRules && (this.requested || this.selected() !== undefined))
             .onClick(() => this.toggleVpn())
         }.width('100%').padding({ top: 20 }).margin({ top: 12 })
       }

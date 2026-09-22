@@ -84,7 +84,7 @@ func dnsUDPOverTCP(address string) {
 		query := append([]byte(nil), buffer[:length]...)
 		go func() {
 			defer func() { <-slots }()
-			response, err := exchangeDNSTCP(address, query)
+			response, err := routingDNS(address, query)
 			if err != nil {
 				logf("DNS TCP exchange: %v", err)
 				return
@@ -179,6 +179,7 @@ func udpSocksLocal(laddr, server string, shadow func(net.PacketConn) net.PacketC
 
 	nm := newNATmap(config.UDPTimeout)
 	buf := make([]byte, udpBufSize)
+	router := &udpRouter{sessions: make(map[string]*udpRouteSession)}
 
 	for {
 		n, raddr, err := c.ReadFromUDPAddrPort(buf)
@@ -187,6 +188,21 @@ func udpSocksLocal(laddr, server string, shadow func(net.PacketConn) net.PacketC
 			continue
 		}
 
+		if n < 4 || buf[0] != 0 || buf[1] != 0 || buf[2] != 0 {
+			continue
+		}
+		header := socks.SplitAddr(buf[3:n])
+		if header == nil {
+			continue
+		}
+		host, _, _ := net.SplitHostPort(header.String())
+		ip, _ := netip.ParseAddr(host)
+		if routingEnabled() || (ip.IsValid() && fakeNetwork.Contains(ip)) {
+			if err := router.send(c, raddr, buf[:n], srvAddr, shadow); err != nil {
+				logf("UDP route: %v", err)
+			}
+			continue
+		}
 		pc := nm.Get(raddr)
 		if pc == nil {
 			pc, err = net.ListenPacket("udp", "")

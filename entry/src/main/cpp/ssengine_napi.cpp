@@ -134,8 +134,8 @@ static napi_value NapiSetEnginePath(napi_env env, napi_callback_info info)
 
 static napi_value NapiStartSsClient(napi_env env, napi_callback_info info)
 {
-    size_t argc = 5;
-    napi_value argv[5] = {nullptr};
+    size_t argc = 6;
+    napi_value argv[6] = {nullptr};
     napi_get_cb_info(env, info, &argc, argv, nullptr, nullptr);
     if (argc < 4) {
         return ThrowError(env, "startSsClient(ssUrl, socksAddr, udpTun, tcpTun, logPath) required");
@@ -164,6 +164,17 @@ static napi_value NapiStartSsClient(napi_env env, napi_callback_info info)
     auto udp = MutableCString(udpTun);
     auto tcp = MutableCString(tcpTun);
     char errBuf[512] = {0};
+    if (argc >= 6) {
+        using ConfigureRouting = int (*)(char *, char *, int);
+        auto configure = reinterpret_cast<ConfigureRouting>(dlsym(g_engine, "SsConfigureRouting"));
+        if (configure == nullptr) {
+            return ThrowError(env, "SsConfigureRouting missing; rebuild libssgo.so");
+        }
+        auto routePath = MutableCString(GetString(env, argv[5]));
+        if (configure(routePath.data(), errBuf, sizeof(errBuf)) != 0) {
+            return ThrowError(env, std::string("routing configuration failed: ") + errBuf);
+        }
+    }
     int rc = g_startClient(ss.data(), socks.data(), udp.data(), tcp.data(), 1, errBuf, sizeof(errBuf));
     if (rc != 0) {
         std::string msg = errBuf[0] ? errBuf : "SsStartClient failed";

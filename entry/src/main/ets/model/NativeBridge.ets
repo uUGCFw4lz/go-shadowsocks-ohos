@@ -12,7 +12,7 @@ import {
 } from 'libssengine.so';
 
 export interface NativeApi {
-  startSsClient: (ssUrl: string, socksAddr: string, udpTun: string, tcpTun: string, logPath: string) => boolean;
+  startSsClient: (ssUrl: string, socksAddr: string, udpTun: string, tcpTun: string, logPath: string, routePath?: string) => boolean;
   startTun2Socks: (tunFd: number, socksAddr: string, mtu: number, dns: string, logPath: string) => boolean;
   waitPort: (host: string, port: number, timeoutMs: number) => boolean;
   socksHttpGet: (socksHost: string, socksPort: number, destHost: string, destPort: number, timeoutMs: number) => string;

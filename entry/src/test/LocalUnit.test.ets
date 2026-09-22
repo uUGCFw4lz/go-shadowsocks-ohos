@@ -1,8 +1,25 @@
 import { describe, beforeAll, beforeEach, afterEach, afterAll, it, expect } from '@ohos/hypium';
 import { CIPHERS, ServerProfile, serverUrl, validateServer } from '../main/ets/model/ServerStore';
+import { parseGfwList } from '../main/ets/model/RoutingStore';
 
 export default function localUnitTest() {
   describe('localUnitTest', () => {
+    it('normalizesGfwDomainRules', 0, () => {
+      const rules = parseGfwList('[AutoProxy 0.2.9]\n||example.com\n.example.com\n@@||safe.example.com\n|https://blocked.test/path\n/regex.*/\n@@https://blocked.test/safe');
+      expect(rules.domainCount).assertEqual(2);
+      expect(rules.exceptionCount).assertEqual(1);
+      expect(rules.skipped).assertEqual(2);
+      expect(rules.content.includes('@@||safe.example.com')).assertTrue();
+    });
+    it('rejectsInvalidGfwDownload', 0, () => {
+      let rejected = false;
+      try {
+        parseGfwList('[AutoProxy 0.2.9]\n! empty list');
+      } catch (_) {
+        rejected = true;
+      }
+      expect(rejected).assertTrue();
+    });
     it('acceptsXChaChaServer', 0, () => {
       const server: ServerProfile = {
         id: 'xchacha', name: 'XChaCha', host: 'example.com', port: 8388,

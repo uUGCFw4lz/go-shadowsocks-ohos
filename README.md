@@ -49,6 +49,22 @@ OHOS_GO=/tmp/shadowsocks-ohos-go-2417e08/bin/go ./native/ssengine/build.sh
 添加和编辑服务器支持 `chacha20-ietf-poly1305`、`aes-128-gcm`、`aes-256-gcm` 和 `xchacha20-ietf-poly1305`。
 xchacha 对应本地 Go 库中的 `AEAD_XCHACHA20_POLY1305`；服务端须支持同一算法，密码和加密方式必须匹配。
 
+## GFWList 分流
+
+- 主界面选择「全局」或「GFWList」，路由模式会保存；连接期间需先断开再切换。
+- 首次使用 GFWList 时点击刷新图标下载规则。依次尝试 gcore、testingcf、fastly jsDelivr HTTPS 镜像和 GitHub 官方原始地址，来源来自 GFWList 仓库 README。
+- 更新有超时和 4 MiB 大小限制，先验证并规范化域名，再原子替换规则文件。更新失败保留旧列表；连接期间更新在下次连接生效。未下载有效列表时不能启动 GFWList 模式。
+- GFWList 模式以直连为默认，支持域名及子域、`||domain`、`.domain`、`*.domain` 和可提取主机名的 URL 规则；`@@` 域名例外优先直连。URL 代理规则按整个域名处理，不按路径匹配。
+- 正则、复杂通配符、带选项的规则、IP 规则及仅针对 URL 路径的例外不支持，下载后显示跳过数量；不是 Android 完整 ACL 或自定义 ACL 编辑器。
+- 系统 VPN 仍接管 IPv4 流量；Go 引擎在 SOCKS TCP/UDP 层决定直连或 SS。DNS 使用 `golang.org/x/net/dns/dnsmessage` 解析，命中域名返回 `198.18.0.0/15` 虚拟 IP，转发时恢复原域名交由 SS 服务端解析。映射持久化，重连不会将缓存的虚拟 IP 指向其他域名。
+- 未命中的域名使用 `223.5.5.5` / `119.29.29.29` 直连 DNS。命中域名的 AAAA、HTTPS/SVCB 查询返回空结果，避免真实 IPv6 或地址提示绕过 IPv4 分流。其他命中域名 DNS 查询经现有 SS TCP DNS 隧道。
+- 分流依赖应用使用 VPN DNS。自带 DoH/DoT、连接前缓存的真实 IP、直接访问 IP 无法可靠还原域名，按直连处理。首次切换建议关闭浏览器安全 DNS 并重启浏览器；当前不提供完整 IPv6 代理。
+- 诊断日志中 `route TCP proxy/direct`、`route UDP proxy=true/false` 可核对实际路由。分流不是隐私防泄漏模式。
+
+更新 native 代码后，先运行 `native/ssengine/build.sh`，再构建 HAP。该脚本会运行规则、TCP/UDP 路由、DNS、映射持久化及现有加密回归测试。
+下载器主机测试：`node --test entry/src/test/RoutingStore.host.cjs`（默认使用 DevEco 的 TypeScript，可用 `TYPESCRIPT_PATH` 覆盖）。
+设置 `GFWLIST_TEST_FILE` 为本地 GFWList 文件路径可额外运行真实列表测试。
+
 ## 试用
 
 1. DevEco Studio 打开本工程，用 HarmonyOS 手机签名安装。
