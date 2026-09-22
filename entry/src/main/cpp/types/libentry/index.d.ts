@@ -1,0 +1,13 @@
+export function spawn(path: string, args: string[], inheritFds: number[], logPath: string): number;
+export function killPid(pid: number, signal?: number): void;
+export function isAlive(pid: number): boolean;
+export function chmodPath(path: string, mode: number): void;
+export function waitPort(host: string, port: number, timeoutMs: number): boolean;
+export function socksHttpGet(socksHost: string, socksPort: number, destHost: string, destPort: number, timeoutMs: number): string;
+export function dnsQuery(host: string, port: number, name: string, timeoutMs: number): string;
+export function clearCloexec(fd: number): number;
+export function dupFd(fd: number): number;
+export function setEnginePath(path: string): boolean;
+export function startSsClient(ssUrl: string, socksAddr: string, udpTun: string, tcpTun: string, logPath: string): boolean;
+export function startTun2Socks(tunFd: number, socksAddr: string, mtu: number, dns: string, logPath: string): boolean;
+export function engineStatus(): string;

@@ -1,0 +1,24 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "module description"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "description"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "Shadowsocks"
+    },
+    {
+      "name": "internet_reason",
+      "value": "用于连接 Shadowsocks 服务器并转发 VPN 流量"
+    },
+    {
+      "name": "netinfo_reason",
+      "value": "用于查询网络状态并建立 VPN 连接"
+    }
+  ]
+}
