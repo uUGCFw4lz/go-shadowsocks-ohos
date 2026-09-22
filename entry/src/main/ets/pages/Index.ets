@@ -122,6 +122,14 @@ struct Index {
     return this.servers.find((server: ServerProfile) => server.id === this.selectedId);
   }
 
+  private canManageServers(): boolean {
+    return this.ready && !this.busy && !this.saving;
+  }
+
+  private serverInUse(id: string): boolean {
+    return id !== '' && this.requested && id === this.selectedId;
+  }
+
   private refreshRules(): void {
     const snapshot = RoutingStore.snapshot(this.context());
     this.rulesReady = snapshot !== undefined;
@@ -188,7 +196,7 @@ struct Index {
   }
 
   private async choose(server: ServerProfile): Promise<void> {
-    if (this.requested || this.busy || !this.ready) {
+    if (this.requested || !this.canManageServers()) {
       return;
     }
     this.busy = true;
@@ -203,9 +211,12 @@ struct Index {
     }
   }
 
-  private openEditor(server?: ServerProfile): void {
-    this.editId = server?.id ?? '';
-    this.editName = server?.name ?? '';
+  private openEditor(server?: ServerProfile, asCopy: boolean = false): void {
+    if (!this.canManageServers() || (!asCopy && this.serverInUse(server?.id ?? ''))) {
+      return;
+    }
+    this.editId = asCopy ? '' : (server?.id ?? '');
+    this.editName = asCopy && server ? `${server.name.substring(0, 45)} 副本` : (server?.name ?? '');
     this.editHost = server?.host ?? '';
     this.editPort = server ? `${server.port}` : '8388';
     this.editMethod = server ? CIPHERS.indexOf(server.method) : 0;
@@ -215,12 +226,7 @@ struct Index {
   }
 
   private duplicateServer(server: ServerProfile): void {
-    if (!this.ready || this.busy || this.requested || this.saving) {
-      return;
-    }
-    this.openEditor(server);
-    this.editId = '';
-    this.editName = `${server.name.substring(0, 45)} 副本`;
+    this.openEditor(server, true);
   }
 
   private closeEditor(): void {
@@ -229,7 +235,7 @@ struct Index {
   }
 
   private openImport(): void {
-    if (!this.ready || this.busy || this.requested) {
+    if (!this.canManageServers()) {
       return;
     }
     this.importText = '';
@@ -244,8 +250,8 @@ struct Index {
   }
 
   private importServer(link: string): void {
-    if (this.requested || !this.ready) {
-      this.importError = '请先断开 VPN';
+    if (!this.canManageServers()) {
+      this.importError = '配置正在处理中，请稍后重试';
       return;
     }
     try {
@@ -258,7 +264,7 @@ struct Index {
   }
 
   private async importClipboard(): Promise<void> {
-    if (this.importingBusy) {
+    if (this.importingBusy || !this.canManageServers()) {
       return;
     }
     this.importingBusy = true;
@@ -274,7 +280,7 @@ struct Index {
   }
 
   private async scanServer(): Promise<void> {
-    if (this.importingBusy) {
+    if (this.importingBusy || !this.canManageServers()) {
       return;
     }
     this.importingBusy = true;
@@ -348,8 +354,19 @@ struct Index {
   }
 
   private async saveServer(): Promise<void> {
+    if (!this.canManageServers()) {
+      return;
+    }
+    if (this.serverInUse(this.editId)) {
+      this.formError = '当前服务器正在使用，请断开 VPN 后再修改';
+      return;
+    }
+    let newId = `${Date.now()}`;
+    while (!this.editId && this.servers.some((item: ServerProfile) => item.id === newId)) {
+      newId = `${Number(newId) + 1}`;
+    }
     const server: ServerProfile = {
-      id: this.editId || `${Date.now()}`, name: this.editName.trim(), host: this.editHost.trim(),
+      id: this.editId || newId, name: this.editName.trim(), host: this.editHost.trim(),
       port: /^\d+$/.test(this.editPort) ? Number(this.editPort) : 0,
       method: CIPHERS[this.editMethod], password: this.editPassword
     };
@@ -374,6 +391,9 @@ struct Index {
   }
 
   private confirmDelete(server: ServerProfile): void {
+    if (!this.canManageServers() || this.serverInUse(server.id)) {
+      return;
+    }
     this.getUIContext().showAlertDialog({
       title: '删除服务器', message: `删除“${server.name}”？`,
       primaryButton: { value: '取消', action: () => {} },
@@ -382,7 +402,7 @@ struct Index {
   }
 
   private async deleteServer(server: ServerProfile): Promise<void> {
-    if (this.busy || this.requested) {
+    if (!this.canManageServers() || this.serverInUse(server.id)) {
       return;
     }
     this.busy = true;
@@ -400,7 +420,7 @@ struct Index {
   }
 
   private async toggleVpn(): Promise<void> {
-    if (this.busy || this.updatingRules) {
+    if (this.busy || this.saving || this.updatingRules) {
       return;
     }
     const server = this.selected();
@@ -507,7 +527,7 @@ struct Index {
       Row({ space: 12 }) {
         Row() {
           PasteButton().height(44).width('100%')
-            .enabled(!this.importingBusy && !this.requested)
+            .enabled(!this.importingBusy && this.canManageServers())
             .onClick((event: ClickEvent, result: PasteButtonOnClickResult) => {
               if (result === PasteButtonOnClickResult.SUCCESS) {
                 this.importClipboard();
@@ -522,7 +542,7 @@ struct Index {
             Text('扫码').fontSize(16).fontColor('#FFFFFF')
           }
         }.height(44).layoutWeight(1).borderRadius(6).backgroundColor('#147D59')
-          .enabled(!this.importingBusy && !this.requested).onClick(() => this.scanServer())
+          .enabled(!this.importingBusy && this.canManageServers()).onClick(() => this.scanServer())
       }.width('100%')
       TextArea({ text: this.importText, placeholder: 'ss://' }).maxLength(8192)
         .fontColor('#182A23').placeholderColor('#66736C').backgroundColor('#EDF2EE')
@@ -533,7 +553,7 @@ struct Index {
       }
       Button('读取配置', { type: ButtonType.Normal }).width('100%').height(48)
         .borderRadius(6).backgroundColor('#147D59')
-        .enabled(!this.importingBusy && !this.requested && this.importText.trim().length > 0)
+        .enabled(!this.importingBusy && this.canManageServers() && this.importText.trim().length > 0)
         .onClick(() => this.importServer(this.importText))
     }.width('100%').height('100%')
   }
@@ -604,19 +624,19 @@ struct Index {
             SymbolGlyph($r('sys.symbol.plus_square_on_square')).fontSize(20).fontColor(['#52635D'])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
             .accessibilityText(`复制 ${server.name}`).bindTips('复制服务器配置')
-            .enabled(this.ready && !this.requested && !this.busy && !this.saving)
+            .enabled(this.canManageServers())
             .onClick(() => this.duplicateServer(server))
         }
         Row({ space: 4 }) {
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor(['#52635D'])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
-            .accessibilityText(`编辑 ${server.name}`).enabled(!this.requested && !this.busy)
+            .accessibilityText(`编辑 ${server.name}`).enabled(this.canManageServers() && !this.serverInUse(server.id))
             .onClick(() => this.openEditor(server))
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.ohos_trash')).fontSize(20).fontColor(['#52635D'])
           }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
-            .accessibilityText(`删除 ${server.name}`).enabled(!this.requested && !this.busy)
+            .accessibilityText(`删除 ${server.name}`).enabled(this.canManageServers() && !this.serverInUse(server.id))
             .onClick(() => this.confirmDelete(server))
         }
       }.width(84).height(88)
@@ -693,11 +713,11 @@ struct Index {
             SymbolGlyph($r('sys.symbol.arrow_down_circle')).fontSize(23).fontColor(['#147D59'])
           }.width(44).height(44).backgroundColor(Color.Transparent)
             .accessibilityText('导入服务器').bindTips('导入服务器')
-            .enabled(this.ready && !this.busy && !this.requested).onClick(() => this.openImport())
+            .enabled(this.canManageServers()).onClick(() => this.openImport())
           Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.plus')).fontSize(23).fontColor(['#147D59'])
           }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('添加服务器')
-            .enabled(this.ready && !this.busy && !this.requested).onClick(() => this.openEditor())
+            .enabled(this.canManageServers()).onClick(() => this.openEditor())
         }.width('100%').margin({ top: 16, bottom: 8 })
         if (!this.servers.length) {
           Column({ space: 16 }) {
