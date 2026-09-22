@@ -125,7 +125,14 @@ struct Index {
   private refreshRules(): void {
     const snapshot = RoutingStore.snapshot(this.context());
     this.rulesReady = snapshot !== undefined;
-    this.rulesStatus = snapshot ? `${snapshot.domainCount} 域名 · ${snapshot.exceptionCount} 例外 · 跳过 ${snapshot.skipped}\n${new Date(snapshot.updatedAt).toLocaleString()}` : '尚未下载 GFWList';
+    if (!snapshot) {
+      this.rulesStatus = '尚未下载 GFWList';
+      return;
+    }
+    const updated = new Date(snapshot.updatedAt);
+    const date = `${updated.getFullYear()}/${String(updated.getMonth() + 1).padStart(2, '0')}/${String(updated.getDate()).padStart(2, '0')}`;
+    const time = `${String(updated.getHours()).padStart(2, '0')}:${String(updated.getMinutes()).padStart(2, '0')}:${String(updated.getSeconds()).padStart(2, '0')}`;
+    this.rulesStatus = `${snapshot.domainCount} 域名 · ${snapshot.exceptionCount} 例外 · 跳过 ${snapshot.skipped}\n${date} ${time}`;
   }
 
   private async changeRoute(mode: string): Promise<void> {
@@ -646,15 +653,17 @@ struct Index {
         if (this.requested) {
           Text('断开后可切换').fontSize(12).fontColor('#52635D').width('100%').margin({ top: 4 })
         }
-        Row({ space: 8 }) {
-          Text(this.updatingRules ? '正在更新 GFWList' : this.rulesStatus)
-            .fontSize(12).fontColor('#52635D').layoutWeight(1).maxLines(2)
-          Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(22).fontColor(['#147D59'])
-          }.width(44).height(44).backgroundColor(Color.Transparent)
-            .accessibilityText('更新 GFWList').bindTips('更新 GFWList')
-            .enabled(this.ready && !this.busy && !this.updatingRules).onClick(() => this.updateRules())
-        }.width('100%')
+        if (this.routeMode === 'gfwlist') {
+          Row({ space: 8 }) {
+            Text(this.updatingRules ? '正在更新 GFWList' : this.rulesStatus)
+              .fontSize(12).fontColor('#52635D').layoutWeight(1).maxLines(2)
+            Button({ type: ButtonType.Normal }) {
+              SymbolGlyph($r('sys.symbol.arrow_clockwise')).fontSize(22).fontColor(['#147D59'])
+            }.width(44).height(44).backgroundColor(Color.Transparent)
+              .accessibilityText('更新 GFWList').bindTips('更新 GFWList')
+              .enabled(this.ready && !this.busy && !this.updatingRules).onClick(() => this.updateRules())
+          }.width('100%')
+        }
         Row() {
           Text('服务器').fontSize(18).fontWeight(FontWeight.Bold).fontColor('#182A23')
           Text(`${this.servers.length}`).fontSize(13).fontColor('#78877F').margin({ left: 8 })
