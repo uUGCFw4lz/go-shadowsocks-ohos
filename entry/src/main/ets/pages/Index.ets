@@ -214,6 +214,15 @@ struct Index {
     this.editing = true;
   }
 
+  private duplicateServer(server: ServerProfile): void {
+    if (!this.ready || this.busy || this.requested || this.saving) {
+      return;
+    }
+    this.openEditor(server);
+    this.editId = '';
+    this.editName = `${server.name.substring(0, 45)} 副本`;
+  }
+
   private closeEditor(): void {
     this.editing = false;
     this.editPassword = '';
@@ -584,21 +593,33 @@ struct Index {
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Text(server.method).fontSize(11).fontColor('#78877F').width('100%')
       }.layoutWeight(1).alignItems(HorizontalAlign.Start).onClick(() => this.choose(server))
-      Button({ type: ButtonType.Normal }) {
-        SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#52635D'])
-      }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
-        .accessibilityText(`分享 ${server.name}`).bindTips('分享服务器').enabled(!this.busy)
-        .onClick(() => this.openShare(server))
-      Button({ type: ButtonType.Normal }) {
-        SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor(['#52635D'])
-      }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
-        .accessibilityText(`编辑 ${server.name}`).enabled(!this.requested && !this.busy)
-        .onClick(() => this.openEditor(server))
-      Button({ type: ButtonType.Normal }) {
-        SymbolGlyph($r('sys.symbol.ohos_trash')).fontSize(20).fontColor(['#52635D'])
-      }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
-        .accessibilityText(`删除 ${server.name}`).enabled(!this.requested && !this.busy)
-        .onClick(() => this.confirmDelete(server))
+      Column() {
+        Row({ space: 4 }) {
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.share')).fontSize(20).fontColor(['#52635D'])
+          }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
+            .accessibilityText(`分享 ${server.name}`).bindTips('分享服务器').enabled(!this.busy)
+            .onClick(() => this.openShare(server))
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.plus_square_on_square')).fontSize(20).fontColor(['#52635D'])
+          }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
+            .accessibilityText(`复制 ${server.name}`).bindTips('复制服务器配置')
+            .enabled(this.ready && !this.requested && !this.busy && !this.saving)
+            .onClick(() => this.duplicateServer(server))
+        }
+        Row({ space: 4 }) {
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.pencil_line')).fontSize(20).fontColor(['#52635D'])
+          }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
+            .accessibilityText(`编辑 ${server.name}`).enabled(!this.requested && !this.busy)
+            .onClick(() => this.openEditor(server))
+          Button({ type: ButtonType.Normal }) {
+            SymbolGlyph($r('sys.symbol.ohos_trash')).fontSize(20).fontColor(['#52635D'])
+          }.width(40).height(44).borderRadius(6).backgroundColor(Color.Transparent)
+            .accessibilityText(`删除 ${server.name}`).enabled(!this.requested && !this.busy)
+            .onClick(() => this.confirmDelete(server))
+        }
+      }.width(84).height(88)
     }.width('100%').padding({ top: 18, bottom: 18, left: 6, right: 6 })
       .backgroundColor(server.id === this.selectedId ? '#EDF6F1' : Color.Transparent)
       .border({ width: { bottom: 1 }, color: '#E0E7E2' })
