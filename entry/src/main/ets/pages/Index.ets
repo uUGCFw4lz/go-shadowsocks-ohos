@@ -350,8 +350,12 @@ struct Index {
     if (this.importingBusy || !this.canManageServers()) {
       return;
     }
+    const fromImport = this.importing;
     this.importingBusy = true;
     this.importError = '';
+    if (!fromImport) {
+      this.error = '';
+    }
     try {
       if (typeof scanCore.isDefaultScanSupported === 'function' && !scanCore.isDefaultScanSupported()) {
         this.importError = '此设备不支持系统扫码，请使用粘贴导入';
@@ -368,6 +372,10 @@ struct Index {
       }
     } finally {
       this.importingBusy = false;
+      if (!fromImport && this.importError) {
+        this.error = this.importError;
+        this.importError = '';
+      }
     }
   }
 
@@ -530,6 +538,14 @@ struct Index {
 
   private refreshLogs(): void {
     this.logText = ['vpn.log', 'ss.log', 't2s.log'].map((name: string) => readLog(this.context(), name)).join('\n\n');
+  }
+
+  private addServerMenu(): MenuElement[] {
+    return [
+      { value: '手工添加服务器', action: () => this.openEditor() },
+      { value: '扫描二维码', action: () => { this.scanServer(); } },
+      { value: 'ss:// 链接', action: () => this.openImport() }
+    ];
   }
 
   @Builder
@@ -795,14 +811,10 @@ struct Index {
           Text(`${this.servers.length}`).fontSize(13).fontColor(this.colors().mutedText).margin({ left: 8 })
           Blank()
           Button({ type: ButtonType.Normal }) {
-            SymbolGlyph($r('sys.symbol.arrow_down_circle')).fontSize(23).fontColor([this.colors().accent])
-          }.width(44).height(44).backgroundColor(Color.Transparent)
-            .accessibilityText('导入服务器').bindTips('导入服务器')
-            .enabled(this.canManageServers()).onClick(() => this.openImport())
-          Button({ type: ButtonType.Normal }) {
             SymbolGlyph($r('sys.symbol.plus')).fontSize(23).fontColor([this.colors().accent])
-          }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('添加服务器')
-            .enabled(this.canManageServers()).onClick(() => this.openEditor())
+          }.width(44).height(44).backgroundColor(Color.Transparent).accessibilityText('添加或导入服务器')
+            .bindTips('添加或导入服务器').enabled(this.canManageServers() && !this.importingBusy)
+            .bindMenu(this.addServerMenu())
         }.width('100%').margin({ top: 16, bottom: 8 })
         if (!this.servers.length) {
           Column({ space: 16 }) {
@@ -810,7 +822,7 @@ struct Index {
             Text(this.ready ? '暂无服务器' : '正在读取配置').fontSize(16).fontColor(this.colors().secondaryText)
             if (this.ready) {
               Button('添加服务器').backgroundColor(this.colors().accent).fontColor(this.colors().onAccent)
-                .onClick(() => this.openEditor())
+                .enabled(this.canManageServers() && !this.importingBusy).bindMenu(this.addServerMenu())
             }
           }.layoutWeight(1).width('100%').justifyContent(FlexAlign.Center)
         } else {

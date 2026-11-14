@@ -20,6 +20,7 @@ function harness(requested = true) {
   const dialogs = [];
   let clipboardReads = 0;
   let scans = 0;
+  const scanState = { error: undefined, supported: true, invalidLink: false };
   let failSave = false;
   let connectionState = { phase: 'connected', serverId: 'active', updatedAt: 1234 };
   const trafficEntries = [
@@ -31,7 +32,10 @@ function harness(requested = true) {
     CIPHERS: ['aes-256-gcm'],
     LIGHT_THEME: { danger: '#FF0000' },
     validateServer: () => '',
-    parseServerUrl: () => ({ ...imported }),
+    parseServerUrl: () => {
+      if (scanState.invalidLink) throw new Error('服务器链接无效');
+      return { ...imported };
+    },
     ServerStore: { save: async (_context, settings) => {
       if (failSave) throw new Error('write failure');
       saves.push(JSON.parse(JSON.stringify(settings)));
@@ -41,8 +45,13 @@ function harness(requested = true) {
       clipboardReads++;
       return { getPrimaryText: () => 'ss://fixture' };
     } }) },
-    scanCore: { ScanType: { QR_CODE: 11 }, ScanErrorCode: { SCAN_SERVICE_CANCELED: 1000500002 } },
-    scanBarcode: { startScanForResult: async () => { scans++; return { originalValue: 'ss://fixture' }; } },
+    scanCore: { ScanType: { QR_CODE: 11 }, ScanErrorCode: { SCAN_SERVICE_CANCELED: 1000500002 },
+      isDefaultScanSupported: () => scanState.supported },
+    scanBarcode: { startScanForResult: async () => {
+      scans++;
+      if (scanState.error) throw scanState.error;
+      return { originalValue: 'ss://fixture' };
+    } },
     readConnectionState: () => connectionState,
     TrafficStore: { load: () => trafficEntries },
     formatTraffic: bytes => `${bytes} B`
@@ -55,7 +64,7 @@ function harness(requested = true) {
     updatingRules: false, routeMode: 'global', requestTime: 0, trafficEntries: [], trafficError: '',
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog: options => dialogs.push(options) })
   });
-  return { page, active, other, saves, dialogs, counts: () => ({ clipboardReads, scans }), fail: () => { failSave = true; },
+  return { page, active, other, saves, dialogs, scanState, counts: () => ({ clipboardReads, scans }), fail: () => { failSave = true; },
     setConnection: value => { connectionState = value; } };
 }
 
@@ -173,4 +182,51 @@ test('traffic follows the active server ID and live speed disappears after disco
   assert.equal(page.liveTraffic, undefined);
   assert.equal(page.trafficServerId, '');
   assert.equal(page.usageText('other'), '累计上传 300 B\n累计下载 400 B');
+});
+
+test('plus menu opens manual, QR and link flows without switching the connected server', async () => {
+  const { page, counts } = harness();
+  const menu = page.addServerMenu();
+  menu[0].action();
+  assert.equal(page.editing, true);
+  assert.equal(page.editId, '');
+  page.closeEditor();
+  menu[2].action();
+  assert.equal(page.importing, true);
+  page.closeImport();
+  menu[1].action();
+  assert.equal(page.importing, false);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(counts().scans, 1);
+  assert.equal(page.editing, true);
+  assert.equal(page.editName, 'Imported');
+  assert.equal(page.selectedId, 'active');
+  page.closeEditor();
+  page.busy = true;
+  menu.forEach(item => item.action());
+  assert.equal(page.editing, false);
+  assert.equal(page.importing, false);
+  assert.equal(counts().scans, 1);
+});
+
+test('direct scanner cancellation and errors stay on the server list', async () => {
+  for (const outcome of ['cancel', 'failure', 'unsupported', 'invalid']) {
+    const { page, scanState } = harness();
+    if (outcome === 'cancel') scanState.error = { code: 1000500002 };
+    if (outcome === 'failure') scanState.error = { code: 100 };
+    if (outcome === 'unsupported') scanState.supported = false;
+    if (outcome === 'invalid') scanState.invalidLink = true;
+    await page.scanServer();
+    assert.equal(page.importing, false);
+    assert.equal(page.editing, false);
+    assert.equal(page.importingBusy, false);
+    assert.equal(page.importError, '');
+    assert.equal(Boolean(page.error), outcome !== 'cancel');
+  }
+  const { page, scanState } = harness();
+  page.openImport();
+  scanState.error = { code: 100 };
+  await page.scanServer();
+  assert.equal(page.importing, true);
+  assert.ok(page.importError);
 });
