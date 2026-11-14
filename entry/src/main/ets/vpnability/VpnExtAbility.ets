@@ -1,9 +1,10 @@
 import { Want } from '@kit.AbilityKit';
 import { vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
-import { BusinessError } from '@kit.BasicServicesKit';
+import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { appendLog, writeConnectionState } from '../model/AppLog';
 import { RoutingStore } from '../model/RoutingStore';
+import { ServerTraffic, TrafficBytes, TrafficSample, TrafficSession, TrafficStore } from '../model/TrafficStore';
 import {
   DEFAULT_SS_URL,
   DNS_TUN_PORT,
@@ -26,6 +27,11 @@ export default class VpnExtAbility extends VpnExtensionAbility {
   private routeMode: string = 'global';
   private phase: string = 'connecting';
   private heartbeat: number = -1;
+  private trafficSession: TrafficSession | undefined = undefined;
+  private trafficReader: (() => TrafficBytes) | undefined = undefined;
+  private trafficEntries: ServerTraffic[] = [];
+  private traffic: TrafficSample | undefined = undefined;
+  private trafficError: string = '';
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'VpnExtAbility onCreate');
@@ -34,7 +40,10 @@ export default class VpnExtAbility extends VpnExtensionAbility {
     this.serverId = typeof selectedId === 'string' ? selectedId : '';
     this.routeMode = want.parameters?.routeMode === 'gfwlist' ? 'gfwlist' : 'global';
     writeConnectionState(this.context, this.phase, this.serverId);
-    this.heartbeat = setInterval(() => writeConnectionState(this.context, this.phase, this.serverId), 1000);
+    this.heartbeat = setInterval(() => {
+      this.sampleTraffic();
+      this.publishState();
+    }, 1000);
     const param = want.parameters?.ssUrl;
     if (typeof param === 'string' && param.length > 0) {
       this.ssUrl = param;
@@ -44,7 +53,7 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       hilog.error(DOMAIN, TAG, 'startPipeline failed %{public}s', msg);
       appendLog(this.context, `startPipeline failed: ${msg}`);
       this.phase = 'failed';
-      writeConnectionState(this.context, this.phase, this.serverId);
+      this.publishState();
     });
   }
 
@@ -55,9 +64,48 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       clearInterval(this.heartbeat);
       this.heartbeat = -1;
     }
+    this.sampleTraffic();
     this.phase = 'disconnected';
-    writeConnectionState(this.context, this.phase, this.serverId);
+    this.publishState();
     this.stopPipeline();
+  }
+
+  private publishState(): void {
+    writeConnectionState(this.context, this.phase, this.serverId,
+      this.phase === 'connected' ? this.traffic : undefined, this.trafficError);
+  }
+
+  private reportTrafficError(err: Error | BusinessError): void {
+    const message = err instanceof Error ? err.message : JSON.stringify(err);
+    if (!this.trafficError) {
+      appendLog(this.context, `traffic statistics failed: ${message}`);
+    }
+    this.trafficError = '流量统计不可用，请查看诊断日志';
+    this.traffic = undefined;
+  }
+
+  private sampleTraffic(): void {
+    if (this.phase !== 'connected' || !this.trafficSession || !this.trafficReader) {
+      return;
+    }
+    try {
+      const sample = this.trafficSession.sample(this.trafficReader(),
+        systemDateTime.getUptime(systemDateTime.TimeType.STARTUP));
+      const entry: ServerTraffic = {
+        serverId: this.serverId, uploadedBytes: sample.uploadedBytes, downloadedBytes: sample.downloadedBytes
+      };
+      const entries = this.trafficEntries.filter((item: ServerTraffic) => item.serverId !== this.serverId);
+      entries.push(entry);
+      const previous = this.trafficEntries.find((item: ServerTraffic) => item.serverId === this.serverId);
+      if (!previous || previous.uploadedBytes !== entry.uploadedBytes || previous.downloadedBytes !== entry.downloadedBytes) {
+        TrafficStore.save(this.context, entries);
+        this.trafficEntries = entries;
+      }
+      this.traffic = sample;
+      this.trafficError = '';
+    } catch (err) {
+      this.reportTrafficError(err);
+    }
   }
 
   private async startPipeline(): Promise<void> {
@@ -103,7 +151,8 @@ export default class VpnExtAbility extends VpnExtensionAbility {
 
     await this.startTun2socks();
     this.phase = 'connected';
-    writeConnectionState(this.context, this.phase, this.serverId);
+    this.sampleTraffic();
+    this.publishState();
   }
 
   private async startSsEngine(): Promise<void> {
@@ -144,6 +193,18 @@ export default class VpnExtAbility extends VpnExtensionAbility {
   private async startTun2socks(): Promise<void> {
     const nativeMod = await import('../model/NativeBridge');
     const native = nativeMod.getNative();
+    try {
+      if (!this.serverId) {
+        throw new Error('Missing server ID for traffic statistics');
+      }
+      this.trafficEntries = TrafficStore.load(this.context);
+      const saved = this.trafficEntries.find((item: ServerTraffic) => item.serverId === this.serverId);
+      this.trafficReader = native.getTrafficStats;
+      this.trafficSession = new TrafficSession(saved ?? { uploadedBytes: 0, downloadedBytes: 0 },
+        this.trafficReader(), systemDateTime.getUptime(systemDateTime.TimeType.STARTUP));
+    } catch (err) {
+      this.reportTrafficError(err);
+    }
     const logDir = this.context.getApplicationContext().filesDir;
     native.clearCloexec(this.tunFd);
     appendLog(this.context, `start tun2socks in-process tunFd=${this.tunFd}`);

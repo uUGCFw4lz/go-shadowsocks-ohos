@@ -211,10 +211,17 @@ func TestTCPDirectAndProxy(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	identity := func(connection net.Conn) net.Conn { return connection }
+	counters := &trafficCounters{}
+	identity := func(connection net.Conn) net.Conn { return &meteredConn{Conn: connection, counters: counters} }
 	connection, err := dialTCPDestination(socks.ParseAddr(listener.Addr().String()), "127.0.0.1:1", identity, true)
 	if err != nil {
 		t.Fatal("direct tried SS:", err)
+	}
+	if _, err := connection.Write([]byte("direct traffic")); err != nil {
+		t.Fatal(err)
+	}
+	if counters.uploaded.Load() != 0 {
+		t.Fatal("direct TCP traffic counted as proxy traffic")
 	}
 	connection.Close()
 	accepted, _ := listener.Accept()
@@ -234,6 +241,19 @@ func TestTCPDirectAndProxy(t *testing.T) {
 	header, err := socks.ReadAddr(accepted)
 	if err != nil || header.String() != "blocked.test:443" {
 		t.Fatalf("proxy header %v: %v", header, err)
+	}
+	if counters.uploaded.Load() != uint64(len(header)) {
+		t.Fatal("proxy TCP upload not counted")
+	}
+	if _, err := accepted.Write([]byte("reply")); err != nil {
+		t.Fatal(err)
+	}
+	connection.SetReadDeadline(time.Now().Add(time.Second))
+	if _, err := io.ReadFull(connection, make([]byte, 5)); err != nil {
+		t.Fatal(err)
+	}
+	if counters.downloaded.Load() != 5 {
+		t.Fatal("proxy TCP download not counted")
 	}
 }
 
@@ -323,6 +343,10 @@ func TestUDPSplitAndFakeReply(t *testing.T) {
 		return connection
 	}
 	direct, proxyServer, local, client := listen(), listen(), listen(), listen()
+	counters := &trafficCounters{}
+	shadow := func(connection net.PacketConn) net.PacketConn {
+		return &meteredPacketConn{PacketConn: connection, counters: counters}
+	}
 	router := &udpRouter{sessions: make(map[string]*udpRouteSession)}
 	defer func() {
 		router.Lock()
@@ -339,7 +363,7 @@ func TestUDPSplitAndFakeReply(t *testing.T) {
 		}
 		packet := append([]byte{0, 0, 0}, socks.ParseAddr(target)...)
 		packet = append(packet, []byte("hello")...)
-		if err := router.send(local, client.LocalAddr().(*net.UDPAddr).AddrPort(), packet, proxyServer.LocalAddr(), func(connection net.PacketConn) net.PacketConn { return connection }); err != nil {
+		if err := router.send(local, client.LocalAddr().(*net.UDPAddr).AddrPort(), packet, proxyServer.LocalAddr(), shadow); err != nil {
 			t.Fatal(err)
 		}
 		buffer := make([]byte, 1024)
@@ -348,6 +372,10 @@ func TestUDPSplitAndFakeReply(t *testing.T) {
 			t.Fatal(err)
 		}
 		payload := buffer[:length]
+		expected := uint64(0)
+		if proxy {
+			expected = uint64(length)
+		}
 		if proxy {
 			header := socks.SplitAddr(payload)
 			if header == nil || header.String() != "blocked.test:443" {
@@ -365,6 +393,9 @@ func TestUDPSplitAndFakeReply(t *testing.T) {
 		}
 		if !bytes.Equal(buffer[:length], packet) {
 			t.Fatal("SOCKS reply must restore original destination")
+		}
+		if up, down := counters.uploaded.Load(), counters.downloaded.Load(); up != expected || down != expected {
+			t.Fatalf("UDP proxy=%t: up=%d down=%d want=%d", proxy, up, down, expected)
 		}
 	}
 }

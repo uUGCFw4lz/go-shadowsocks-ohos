@@ -247,6 +247,29 @@ static napi_value NapiEngineStatus(napi_env env, napi_callback_info info)
     return result;
 }
 
+static napi_value NapiGetTrafficStats(napi_env env, napi_callback_info info)
+{
+    (void)info;
+    if (!LoadEngine()) {
+        return ThrowError(env, std::string("load libssgo.so failed: ") + g_engineStatus);
+    }
+    using GetTrafficStats = void (*)(unsigned long long *, unsigned long long *);
+    auto getStats = reinterpret_cast<GetTrafficStats>(dlsym(g_engine, "SsGetTrafficStats"));
+    if (getStats == nullptr) {
+        return ThrowError(env, "SsGetTrafficStats missing; rebuild libssgo.so");
+    }
+    unsigned long long uploaded = 0;
+    unsigned long long downloaded = 0;
+    getStats(&uploaded, &downloaded);
+    napi_value result, up, down;
+    napi_create_object(env, &result);
+    napi_create_double(env, static_cast<double>(uploaded), &up);
+    napi_create_double(env, static_cast<double>(downloaded), &down);
+    napi_set_named_property(env, result, "uploadedBytes", up);
+    napi_set_named_property(env, result, "downloadedBytes", down);
+    return result;
+}
+
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
@@ -257,6 +280,7 @@ static napi_value Init(napi_env env, napi_value exports)
         {"startSsClient", nullptr, NapiStartSsClient, nullptr, nullptr, nullptr, attr, nullptr},
         {"startTun2Socks", nullptr, NapiStartTun2Socks, nullptr, nullptr, nullptr, attr, nullptr},
         {"engineStatus", nullptr, NapiEngineStatus, nullptr, nullptr, nullptr, attr, nullptr},
+        {"getTrafficStats", nullptr, NapiGetTrafficStats, nullptr, nullptr, nullptr, attr, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

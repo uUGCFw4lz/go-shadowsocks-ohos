@@ -22,6 +22,8 @@ func TestXChaChaClient(t *testing.T) {
 			if err != nil {
 				t.Fatalf("client cipher: %v", err)
 			}
+			counters := &trafficCounters{}
+			clientCipher = meteredCipher{Cipher: clientCipher, counters: counters}
 			serverCipher, err := core.PickCipher("AEAD_XCHACHA20_POLY1305", nil, password)
 			if err != nil {
 				t.Fatalf("server cipher: %v", err)
@@ -46,6 +48,9 @@ func TestXChaChaClient(t *testing.T) {
 			}
 			if err := <-finished; err != nil {
 				t.Fatal(err)
+			}
+			if up, down := counters.uploaded.Load(), counters.downloaded.Load(); up <= uint64(len(payload)) || down != 0 {
+				t.Fatalf("expected encrypted upload including overhead: up=%d down=%d", up, down)
 			}
 		})
 	}

@@ -68,4 +68,10 @@ func SsStartTun2Socks(tunFd C.int, socksAddr *C.char, mtu C.int, dns *C.char, er
 	return 0
 }
 
+//export SsGetTrafficStats
+func SsGetTrafficStats(uploaded, downloaded *C.ulonglong) {
+	*uploaded = C.ulonglong(clientTraffic.uploaded.Load())
+	*downloaded = C.ulonglong(clientTraffic.downloaded.Load())
+}
+
 func main() {}

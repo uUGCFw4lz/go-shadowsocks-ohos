@@ -21,8 +21,8 @@ fi
 
 cd "$ROOT"
 GOOS="$("$HOST_GO" env GOHOSTOS)" GOARCH="$("$HOST_GO" env GOHOSTARCH)" CGO_ENABLED=0 \
-  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go rules.go routing.go routing_udp.go \
-    client_test.go udp_test.go rules_test.go routing_test.go
+  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go rules.go routing.go routing_udp.go traffic.go \
+    client_test.go udp_test.go rules_test.go routing_test.go traffic_test.go
 
 export CGO_ENABLED=1
 export GOOS=openharmony
@@ -40,6 +40,6 @@ mkdir -p "$LIBS"
 # produced by CMake; a Go binary with the same name would overwrite it in HAP.
 rm -f "$LIBS/libssengine.so"
 
-"$NDK/llvm/bin/llvm-nm" -D "$LIBS/libssgo.so" | grep -E 'SsStart|SsSet'
+"$NDK/llvm/bin/llvm-nm" -D "$LIBS/libssgo.so" | grep -E 'SsStart|SsSet|SsGetTraffic'
 file "$LIBS/libssgo.so"
 ls -lh "$LIBS/libssgo.so"

@@ -1,7 +1,8 @@
 import { common, Want } from '@kit.AbilityKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { BUNDLE_NAME, VPN_ABILITY } from '../model/SsConfig';
-import { readLog, readConnectionState } from '../model/AppLog';
+import { appendLog, ConnectionState, readLog, readConnectionState } from '../model/AppLog';
+import { formatTraffic, ServerTraffic, TrafficSample, TrafficStore } from '../model/TrafficStore';
 import { CIPHERS, ServerProfile, ServerStore, serverUrl, validateServer } from '../model/ServerStore';
 import { RoutingStore } from '../model/RoutingStore';
 import { parseServerUrl, shareServerUrl } from '../model/ServerLink';
@@ -45,6 +46,11 @@ struct Index {
   @State shareStatus: string = '';
   @State sharingBusy: boolean = false;
   @State themeMode: ThemeMode = 'light';
+  @State trafficEntries: ServerTraffic[] = [];
+  @State liveTraffic: TrafficSample | undefined = undefined;
+  @State trafficServerId: string = '';
+  @State trafficError: string = '';
+  @State trafficReadFailed: boolean = false;
   private observer: vpnExtension.VpnObserver | undefined = undefined;
   private timer: number = -1;
   private requestTime: number = 0;
@@ -215,6 +221,7 @@ struct Index {
     this.connected = state.phase === 'connected';
     this.requested = this.connected || state.phase === 'connecting';
     this.status = this.connected ? '已连接' : (this.requested ? '正在连接' : '未连接');
+    this.refreshTraffic(state);
     if (this.requested && state.serverId && this.servers.some((server: ServerProfile) => server.id === state.serverId)) {
       this.selectedId = state.serverId;
     }
@@ -222,6 +229,37 @@ struct Index {
       this.status = '连接失败';
       this.error = '服务器连接失败，请检查配置或查看诊断日志';
     }
+  }
+
+  private refreshTraffic(state: ConnectionState): void {
+    this.liveTraffic = this.connected ? state.traffic : undefined;
+    this.trafficServerId = this.connected ? state.serverId : '';
+    try {
+      this.trafficEntries = TrafficStore.load(this.context());
+      this.trafficReadFailed = false;
+      this.trafficError = state.trafficError ?? '';
+    } catch (err) {
+      if (!this.trafficError) {
+        appendLog(this.context(), `read traffic totals failed: ${JSON.stringify(err)}`);
+      }
+      this.trafficReadFailed = true;
+      this.trafficError = '流量统计读取失败，请查看诊断日志';
+    }
+  }
+
+  private usageText(id: string): string {
+    const saved = this.trafficEntries.find((item: ServerTraffic) => item.serverId === id);
+    if (this.trafficReadFailed) {
+      return '累计流量暂不可用';
+    }
+    return `累计上传 ${formatTraffic(saved?.uploadedBytes ?? 0)}\n累计下载 ${formatTraffic(saved?.downloadedBytes ?? 0)}`;
+  }
+
+  private speedText(): string {
+    if (!this.liveTraffic || this.trafficError) {
+      return this.trafficError ? '速度暂不可用' : '正在读取速度';
+    }
+    return `上传 ${formatTraffic(this.liveTraffic.uploadSpeed)}/s\n下载 ${formatTraffic(this.liveTraffic.downloadSpeed)}/s`;
   }
 
   private async choose(server: ServerProfile): Promise<void> {
@@ -643,6 +681,10 @@ struct Index {
         Text(`${server.host}:${server.port}`).fontSize(13).fontColor(this.colors().secondaryText).maxLines(1)
           .textOverflow({ overflow: TextOverflow.Ellipsis }).width('100%')
         Text(server.method).fontSize(11).fontColor(this.colors().mutedText).width('100%')
+        Text(this.usageText(server.id)).fontSize(12).fontColor(this.colors().secondaryText).width('100%')
+        if (this.connected && server.id === this.trafficServerId) {
+          Text(this.speedText()).fontSize(12).fontColor(this.colors().accent).width('100%')
+        }
       }.layoutWeight(1).alignItems(HorizontalAlign.Start).onClick(() => this.choose(server))
       Column() {
         Row({ space: 4 }) {
@@ -717,6 +759,9 @@ struct Index {
           Blank()
           Text('VPN').fontSize(12).fontWeight(FontWeight.Bold).fontColor(this.colors().mutedText)
         }.width('100%').margin({ top: 24, bottom: 24 })
+        if (this.trafficError) {
+          Text(this.trafficError).fontSize(12).fontColor(this.colors().danger).width('100%').margin({ bottom: 12 })
+        }
         Divider().color(this.colors().border)
         Row({ space: 8 }) {
           Text('代理模式').fontSize(14).fontColor(this.colors().secondaryText)

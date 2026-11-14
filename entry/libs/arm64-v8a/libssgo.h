@@ -91,6 +91,7 @@ extern int SsSetLogPath(char* path);
 extern int SsConfigureRouting(char* path, char* errBuf, int errBufLen);
 extern int SsStartClient(char* ssURL, char* socksAddr, char* udpTun, char* tcpTun, int verbose, char* errBuf, int errBufLen);
 extern int SsStartTun2Socks(int tunFd, char* socksAddr, int mtu, char* dns, char* errBuf, int errBufLen);
+extern void SsGetTrafficStats(unsigned long long* uploaded, unsigned long long* downloaded);
 
 #ifdef __cplusplus
 }

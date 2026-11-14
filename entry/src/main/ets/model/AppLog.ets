@@ -1,6 +1,7 @@
 import { common } from '@kit.AbilityKit';
 import { fileIo as fs } from '@kit.CoreFileKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
+import { TrafficSample } from './TrafficStore';
 
 const DOMAIN = 0x3200;
 const LOG_NAME = 'vpn.log';
@@ -9,10 +10,15 @@ export interface ConnectionState {
   phase: string;
   serverId: string;
   updatedAt: number;
+  traffic?: TrafficSample;
+  trafficError?: string;
 }
 
-export function writeConnectionState(context: common.Context, phase: string, serverId: string): void {
-  const state: ConnectionState = { phase: phase, serverId: serverId, updatedAt: Date.now() };
+export function writeConnectionState(context: common.Context, phase: string, serverId: string,
+  traffic?: TrafficSample, trafficError?: string): void {
+  const state: ConnectionState = {
+    phase: phase, serverId: serverId, updatedAt: Date.now(), traffic: traffic, trafficError: trafficError
+  };
   const path = `${appFilesDir(context)}/connection-state.json`;
   try {
     const file = fs.openSync(`${path}.tmp`, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
@@ -22,7 +28,8 @@ export function writeConnectionState(context: common.Context, phase: string, ser
       fs.closeSync(file);
     }
     fs.renameSync(`${path}.tmp`, path);
-  } catch (_) {
+  } catch (err) {
+    hilog.error(DOMAIN, 'ssvpn', 'writeConnectionState fail %{public}s', JSON.stringify(err));
   }
 }
 

@@ -21,9 +21,15 @@ function harness(requested = true) {
   let clipboardReads = 0;
   let scans = 0;
   let failSave = false;
+  let connectionState = { phase: 'connected', serverId: 'active', updatedAt: 1234 };
+  const trafficEntries = [
+    { serverId: 'active', uploadedBytes: 100, downloadedBytes: 200 },
+    { serverId: 'other', uploadedBytes: 300, downloadedBytes: 400 }
+  ];
   const sandbox = {
     Date: class extends Date { static now() { return 1234; } },
     CIPHERS: ['aes-256-gcm'],
+    LIGHT_THEME: { danger: '#FF0000' },
     validateServer: () => '',
     parseServerUrl: () => ({ ...imported }),
     ServerStore: { save: async (_context, settings) => {
@@ -37,17 +43,20 @@ function harness(requested = true) {
     } }) },
     scanCore: { ScanType: { QR_CODE: 11 }, ScanErrorCode: { SCAN_SERVICE_CANCELED: 1000500002 } },
     scanBarcode: { startScanForResult: async () => { scans++; return { originalValue: 'ss://fixture' }; } },
-    readConnectionState: () => ({ phase: 'connected', serverId: 'active', updatedAt: 1234 })
+    readConnectionState: () => connectionState,
+    TrafficStore: { load: () => trafficEntries },
+    formatTraffic: bytes => `${bytes} B`
   };
   vm.runInNewContext(code, sandbox);
   const page = new sandbox.Probe();
   Object.assign(page, {
     servers: [active, other], selectedId: active.id, ready: true, busy: false, saving: false,
     requested, connected: requested, editing: false, editId: '', importing: false, importingBusy: false,
-    updatingRules: false, routeMode: 'global', requestTime: 0,
+    updatingRules: false, routeMode: 'global', requestTime: 0, trafficEntries: [], trafficError: '',
     getUIContext: () => ({ getHostContext: () => ({}), showAlertDialog: options => dialogs.push(options) })
   });
-  return { page, active, other, saves, dialogs, counts: () => ({ clipboardReads, scans }), fail: () => { failSave = true; } };
+  return { page, active, other, saves, dialogs, counts: () => ({ clipboardReads, scans }), fail: () => { failSave = true; },
+    setConnection: value => { connectionState = value; } };
 }
 
 test('connected manual add and active-server copy preserve active configuration and selection', async () => {
@@ -143,4 +152,25 @@ test('connected node and mode switching remain locked; cancel/failure leave prof
   assert.equal(page.saving, false);
   assert.equal(page.editing, true);
   assert.equal(page.selectedId, active.id);
+});
+
+test('traffic follows the active server ID and live speed disappears after disconnect', () => {
+  const { page, setConnection } = harness();
+  setConnection({ phase: 'connected', serverId: 'other', updatedAt: 1234,
+    traffic: { uploadedBytes: 300, downloadedBytes: 400, uploadSpeed: 20, downloadSpeed: 40 } });
+  page.pollStatus();
+  assert.equal(page.trafficServerId, 'other');
+  assert.equal(page.selectedId, 'other');
+  assert.equal(page.speedText(), '上传 20 B/s\n下载 40 B/s');
+  assert.equal(page.usageText('active'), '累计上传 100 B\n累计下载 200 B');
+  assert.equal(page.usageText('other'), '累计上传 300 B\n累计下载 400 B');
+  setConnection({ phase: 'connected', serverId: 'other', updatedAt: 1234, trafficError: 'statistics error' });
+  page.pollStatus();
+  assert.equal(page.speedText(), '速度暂不可用');
+  assert.equal(page.usageText('other'), '累计上传 300 B\n累计下载 400 B');
+  setConnection({ phase: 'disconnected', serverId: '', updatedAt: 0 });
+  page.pollStatus();
+  assert.equal(page.liveTraffic, undefined);
+  assert.equal(page.trafficServerId, '');
+  assert.equal(page.usageText('other'), '累计上传 300 B\n累计下载 400 B');
 });

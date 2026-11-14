@@ -8,8 +8,10 @@ import {
   startSsClient,
   startTun2Socks,
   engineStatus,
-  setEnginePath
+  setEnginePath,
+  getTrafficStats
 } from 'libssengine.so';
+import { TrafficBytes } from './TrafficStore';
 
 export interface NativeApi {
   startSsClient: (ssUrl: string, socksAddr: string, udpTun: string, tcpTun: string, logPath: string, routePath?: string) => boolean;
@@ -20,6 +22,7 @@ export interface NativeApi {
   clearCloexec: (fd: number) => number;
   setEnginePath: (path: string) => boolean;
   engineStatus?: () => string;
+  getTrafficStats: () => TrafficBytes;
 }
 
 export function getNative(): NativeApi {
@@ -37,6 +40,7 @@ export function getNative(): NativeApi {
     dnsQuery,
     clearCloexec,
     setEnginePath,
-    engineStatus
+    engineStatus,
+    getTrafficStats
   };
 }

@@ -52,6 +52,7 @@ func startShadowsocksClient(ssURL, socksAddr, udpTunSpec, tcpTunSpec string, ver
 	if err != nil {
 		return fmt.Errorf("cipher: %w", err)
 	}
+	ciph = meteredCipher{Cipher: ciph, counters: &clientTraffic}
 
 	if udpTunSpec != "" {
 		for _, tun := range strings.Split(udpTunSpec, ",") {
