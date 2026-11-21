@@ -1,10 +1,11 @@
 import { common, Want } from '@kit.AbilityKit';
 import { vpnExtension } from '@kit.NetworkKit';
 import { BUNDLE_NAME, VPN_ABILITY } from '../model/SsConfig';
-import { appendLog, ConnectionState, readLog, readConnectionState } from '../model/AppLog';
+import { appendLog, ConnectionState, readLog, readConnectionState, requestVpnStop } from '../model/AppLog';
+import { util } from '@kit.ArkTS';
 import { formatTraffic, ServerTraffic, TrafficSample, TrafficStore } from '../model/TrafficStore';
 import { CIPHERS, ServerProfile, ServerStore, serverUrl, validateServer } from '../model/ServerStore';
-import { RoutingStore } from '../model/RoutingStore';
+import { ROUTE_MODES, RouteModeOption, RoutingStore } from '../model/RoutingStore';
 import { parseServerUrl, shareServerUrl } from '../model/ServerLink';
 import { pasteboard, BusinessError } from '@kit.BasicServicesKit';
 import { scanBarcode, scanCore } from '@kit.ScanKit';
@@ -219,15 +220,21 @@ struct Index {
       return;
     }
     this.connected = state.phase === 'connected';
-    this.requested = this.connected || state.phase === 'connecting';
-    this.status = this.connected ? '已连接' : (this.requested ? '正在连接' : '未连接');
+    this.requested = this.connected || state.phase === 'connecting' || state.phase === 'disconnecting' ||
+      state.phase === 'stop-failed';
+    this.status = state.phase === 'disconnecting' ? '正在断开' :
+      (this.connected ? '已连接' : (this.requested ? '正在连接' : '未连接'));
     this.refreshTraffic(state);
     if (this.requested && state.serverId && this.servers.some((server: ServerProfile) => server.id === state.serverId)) {
       this.selectedId = state.serverId;
     }
     if (state.phase === 'failed') {
       this.status = '连接失败';
-      this.error = '服务器连接失败，请检查配置或查看诊断日志';
+      this.error = state.connectionError || 'VPN 连接失败，请查看诊断日志';
+    }
+    if (state.phase === 'stop-failed') {
+      this.status = '断开失败';
+      this.error = state.connectionError || 'VPN 断开失败，请查看诊断日志';
     }
   }
 
@@ -494,6 +501,32 @@ struct Index {
     }
   }
 
+  private async stopVpn(want: Want): Promise<void> {
+    const session = readConnectionState(this.context());
+    if (!session.sessionId || session.phase === 'disconnected') {
+      await vpnExtension.stopVpnExtensionAbility(want);
+      return;
+    }
+    this.status = '正在断开';
+    const requestId = util.generateRandomUUID();
+    requestVpnStop(this.context(), session.sessionId, requestId);
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      const state = readConnectionState(this.context());
+      if (state.sessionId === session.sessionId && state.stopRequestId === requestId) {
+        if (state.phase === 'disconnected') {
+          await vpnExtension.stopVpnExtensionAbility(want);
+          return;
+        }
+        if (state.phase === 'stop-failed') {
+          throw new Error(state.connectionError || 'VPN 断开失败，请查看诊断日志');
+        }
+      }
+      await new Promise<void>((resolve: () => void) => setTimeout(resolve, 100));
+    }
+    throw new Error('VPN 尚未完成断开，请稍后重试');
+  }
+
   private async toggleVpn(): Promise<void> {
     if (this.busy || this.saving || this.updatingRules) {
       return;
@@ -505,7 +538,7 @@ struct Index {
     try {
       if (this.requested) {
         this.requestTime = Date.now();
-        await vpnExtension.stopVpnExtensionAbility(want);
+        await this.stopVpn(want);
         this.requested = false;
         this.connected = false;
         this.status = '未连接';
@@ -521,16 +554,16 @@ struct Index {
         }
         this.requestTime = Date.now();
         if (readConnectionState(this.context()).phase === 'failed') {
-          await vpnExtension.stopVpnExtensionAbility(want);
+          await this.stopVpn(want);
         }
         want.parameters = { ssUrl: serverUrl(server), serverId: server.id, routeMode: this.routeMode };
         await vpnExtension.startVpnExtensionAbility(want);
         this.requested = true;
         this.status = '正在连接';
       }
-    } catch (_) {
+    } catch (err) {
       this.requestTime = 0;
-      this.error = 'VPN 操作失败，请查看诊断日志';
+      this.error = err instanceof Error ? err.message : 'VPN 操作失败，请查看诊断日志';
     } finally {
       this.busy = false;
     }
@@ -781,16 +814,20 @@ struct Index {
         Divider().color(this.colors().border)
         Row({ space: 8 }) {
           Text('代理模式').fontSize(14).fontColor(this.colors().secondaryText)
-          Select([{ value: '全局' }, { value: 'GFWList' }])
-            .selected(this.routeMode === 'gfwlist' ? 1 : 0)
-            .value(this.routeMode === 'gfwlist' ? 'GFWList' : '全局')
+          Select(ROUTE_MODES.map((mode: RouteModeOption): SelectOption => ({ value: mode.label })))
+            .selected(ROUTE_MODES.findIndex((mode: RouteModeOption) => mode.id === this.routeMode))
+            .value(ROUTE_MODES.find((mode: RouteModeOption) => mode.id === this.routeMode)?.label ?? '')
             .height(44).layoutWeight(1)
             .fontColor(this.colors().text).backgroundColor(this.colors().input)
             .optionFontColor(this.colors().text).optionBgColor(this.colors().input)
             .selectedOptionFontColor(this.colors().text).selectedOptionBgColor(this.colors().selectedInput)
             .accessibilityText('代理模式')
             .enabled(this.ready && !this.busy && !this.requested && !this.updatingRules)
-            .onSelect((index: number) => { this.changeRoute(index === 1 ? 'gfwlist' : 'global'); })
+            .onSelect((index: number) => {
+              if (index >= 0 && index < ROUTE_MODES.length) {
+                this.changeRoute(ROUTE_MODES[index].id);
+              }
+            })
         }.width('100%').margin({ top: 12 })
         if (this.requested) {
           Text('断开后可切换').fontSize(12).fontColor(this.colors().secondaryText).width('100%').margin({ top: 4 })

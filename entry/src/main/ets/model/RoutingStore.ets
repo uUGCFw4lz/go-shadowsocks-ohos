@@ -12,6 +12,24 @@ export const GFWLIST_URLS: string[] = [
 ];
 const MAX_LIST_SIZE = 4 * 1024 * 1024;
 
+export interface RouteModeOption {
+  id: string;
+  label: string;
+}
+
+export const ROUTE_MODES: RouteModeOption[] = [
+  { id: 'global', label: '全局' },
+  { id: 'bypass-lan', label: '绕过局域网地址' },
+  { id: 'bypass-china', label: '绕过中国大陆地址' },
+  { id: 'bypass-lan-china', label: '绕过局域网及中国大陆地址' },
+  { id: 'gfwlist', label: 'GFW列表' },
+  { id: 'china-list', label: '仅代理中国大陆地址' }
+];
+
+export function isRouteMode(mode: string): boolean {
+  return ROUTE_MODES.some((option: RouteModeOption) => option.id === mode);
+}
+
 export interface GfwRules {
   content: string;
   domainCount: number;
@@ -119,11 +137,15 @@ export class RoutingStore {
 
   static async mode(context: common.Context): Promise<string> {
     const store = await preferences.getPreferences(context, 'ss_routing');
-    return await store.get('mode', 'global') === 'gfwlist' ? 'gfwlist' : 'global';
+    const mode = await store.get('mode', 'global');
+    if (typeof mode !== 'string' || !isRouteMode(mode)) {
+      throw new Error('无效的路由模式');
+    }
+    return mode;
   }
 
   static async saveMode(context: common.Context, mode: string): Promise<void> {
-    if (mode !== 'global' && mode !== 'gfwlist') {
+    if (!isRouteMode(mode)) {
       throw new Error('无效的路由模式');
     }
     const store = await preferences.getPreferences(context, 'ss_routing');
@@ -148,7 +170,7 @@ export class RoutingStore {
   }
 
   static prepare(context: common.Context, mode: string): string {
-    if (mode !== 'global' && mode !== 'gfwlist') {
+    if (!isRouteMode(mode)) {
       throw new Error('无效的路由模式');
     }
     if (mode === 'gfwlist' && !RoutingStore.snapshot(context)) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +17,230 @@ import (
 	"github.com/shadowsocks/go-shadowsocks2/socks"
 	"golang.org/x/net/dns/dnsmessage"
 )
+
+func TestBundledACLRouting(t *testing.T) {
+	previous, previousLookup := routes, lookupRouteIP
+	defer func() { routes, lookupRouteIP = previous, previousLookup }()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "routing.json")
+	for _, testCase := range []struct {
+		mode                        string
+		lan, china, foreign, google bool
+	}{
+		{"bypass-lan", false, true, true, true},
+		{"bypass-china", true, false, true, true},
+		{"bypass-lan-china", false, false, true, true},
+		{"china-list", false, true, false, false},
+	} {
+		t.Run(testCase.mode, func(t *testing.T) {
+			content, _ := json.Marshal(routingOptions{Mode: testCase.mode})
+			if err := os.WriteFile(path, content, 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := configureRouting(path); err != nil {
+				t.Fatal(err)
+			}
+			if !routingEnabled() {
+				t.Fatal("ACL mode disabled split routing")
+			}
+			for _, target := range []struct {
+				host  string
+				proxy bool
+			}{
+				{"192.168.1.1", testCase.lan},
+				{"223.5.5.5", testCase.china},
+				{"8.8.8.8", testCase.foreign},
+				{"www.google.com", testCase.google},
+			} {
+				lookupRouteIP = func(host string) ([]net.IP, error) {
+					return []net.IP{net.ParseIP("8.8.8.8")}, nil
+				}
+				_, proxy, err := routeDestination(net.JoinHostPort(target.host, "443"))
+				if err != nil || proxy != target.proxy {
+					t.Fatalf("%s: proxy=%t want=%t error=%v", target.host, proxy, target.proxy, err)
+				}
+			}
+			lookupRouteIP = func(host string) ([]net.IP, error) {
+				return []net.IP{net.ParseIP("223.5.5.5")}, nil
+			}
+			destination, proxy, err := routeDestination("unlisted.test:443")
+			if err != nil || proxy != testCase.china || destination != "223.5.5.5:443" {
+				t.Fatalf("unlisted domain must follow resolved CIDR: %s %t %v", destination, proxy, err)
+			}
+		})
+	}
+}
+
+func TestACLDomainAndNetworkPrecedence(t *testing.T) {
+	rules, err := parseACL("[proxy_all]\n[bypass_list]\n10.0.0.0/8\n(?:^|\\.)direct.test$\n[proxy_list]\n(?:^|\\.)proxy.test$\n^special[0-9]+\\.test$\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, host := range []string{"direct.test", "www.direct.test"} {
+		if proxy, explicit := rules.domainPolicy(host); proxy || !explicit {
+			t.Fatalf("direct suffix not honored: %s", host)
+		}
+	}
+	for _, host := range []string{"www.proxy.test", "special42.test"} {
+		if proxy, explicit := rules.domainPolicy(host); !proxy || !explicit {
+			t.Fatalf("proxy expression not honored: %s", host)
+		}
+	}
+	if _, explicit := rules.domainPolicy("notdirect.test"); explicit {
+		t.Fatal("suffix matched without a label boundary")
+	}
+	if rules.proxyIP(netip.MustParseAddr("::ffff:10.1.2.3")) || !rules.proxyIP(netip.MustParseAddr("11.1.2.3")) {
+		t.Fatal("CIDR boundary or IPv4-mapped address routing failed")
+	}
+	for _, content := range []string{"", "[proxy_all]", "[unsupported]\nexample", "[proxy_all]\n[bypass_list]\n("} {
+		if _, err := parseACL(content); err == nil {
+			t.Fatalf("invalid ACL accepted: %q", content)
+		}
+	}
+}
+
+func TestACLDNSUsesDomainsAndRealIPRules(t *testing.T) {
+	previous, previousDNS := routes, queryDirectDNS
+	defer func() { routes, queryDirectDNS = previous, previousDNS }()
+	acl, err := parseACL("[proxy_all]\n[bypass_list]\n223.5.5.0/24\n(?:^|\\.)direct.test$\n[proxy_list]\n(?:^|\\.)blocked.test$\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes = &routeTable{acl: acl, domains: make(map[string]string), hosts: make(map[string]string)}
+	directCalls := 0
+	queryDirectDNS = func(packet []byte) ([]byte, error) {
+		directCalls++
+		var response dnsmessage.Message
+		if err := response.Unpack(packet); err != nil {
+			return nil, err
+		}
+		response.Response = true
+		response.Answers = []dnsmessage.Resource{{Header: dnsmessage.ResourceHeader{Name: response.Questions[0].Name, Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60}, Body: &dnsmessage.AResource{A: [4]byte{223, 5, 5, 5}}}}
+		return response.Pack()
+	}
+	for _, host := range []string{"blocked.test", "direct.test", "unlisted.test"} {
+		for _, queryType := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA, dnsmessage.Type(65)} {
+			query := dnsmessage.Message{Header: dnsmessage.Header{ID: 7}, Questions: []dnsmessage.Question{{Name: dnsmessage.MustNewName(host + "."), Type: queryType, Class: dnsmessage.ClassINET}}}
+			packet, _ := query.Pack()
+			answer, err := routingDNS("unused", packet)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var response dnsmessage.Message
+			if err := response.Unpack(answer); err != nil {
+				t.Fatal(err)
+			}
+			if queryType != dnsmessage.TypeA {
+				if len(response.Answers) != 0 {
+					t.Fatal("IPv6 or HTTPS hints escaped ACL routing")
+				}
+				continue
+			}
+			ip := netip.AddrFrom4(response.Answers[0].Body.(*dnsmessage.AResource).A)
+			destination, proxy, err := routeDestination(ip.String() + ":443")
+			if err != nil || proxy != (host == "blocked.test") {
+				t.Fatalf("%s: %s proxy=%t error=%v", host, destination, proxy, err)
+			}
+			if host != "unlisted.test" && destination != host+":443" {
+				t.Fatal("explicit DNS policy lost original hostname")
+			}
+		}
+	}
+	if directCalls != 1 {
+		t.Fatalf("unexpected direct DNS queries: %d", directCalls)
+	}
+}
+
+func TestACLDirectTimeoutDoesNotUseProxy(t *testing.T) {
+	previous, previousDial := routes, dialRouteTCP
+	defer func() { routes, dialRouteTCP = previous, previousDial }()
+	for _, mode := range []string{"bypass-china", "bypass-lan-china", "china-list"} {
+		data, err := bundledACL.ReadFile("acl/" + mode + ".acl")
+		if err != nil {
+			t.Fatal(err)
+		}
+		acl, err := parseACL(string(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		routes = &routeTable{acl: acl}
+		target := "223.5.5.5:443"
+		if mode == "china-list" {
+			target = "8.8.8.8:443"
+		}
+		calls := 0
+		dialRouteTCP = func(network, address string, timeout time.Duration) (net.Conn, error) {
+			calls++
+			if address != target || timeout != 10*time.Second {
+				t.Errorf("ACL direct route was changed: %s %s", address, timeout)
+			}
+			return nil, os.ErrDeadlineExceeded
+		}
+		_, err = dialTCPDestination(socks.ParseAddr(target), "proxy.test:8388", nil, true)
+		if err != os.ErrDeadlineExceeded || calls != 1 {
+			t.Fatalf("%s: direct timeout fell back to proxy", mode)
+		}
+	}
+}
+
+func TestACLUDPRoutesLANAndPublicIP(t *testing.T) {
+	previous := routes
+	defer func() { routes = previous }()
+	data, err := bundledACL.ReadFile("acl/bypass-lan.acl")
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := parseACL(string(data))
+	if err != nil {
+		t.Fatal(err)
+	}
+	routes = &routeTable{acl: acl}
+	listen := func() *net.UDPConn {
+		connection, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { connection.Close() })
+		connection.SetReadDeadline(time.Now().Add(3 * time.Second))
+		return connection
+	}
+	direct, server, local, client := listen(), listen(), listen(), listen()
+	router := &udpRouter{sessions: make(map[string]*udpRouteSession)}
+	defer func() {
+		router.Lock()
+		defer router.Unlock()
+		for _, session := range router.sessions {
+			session.connection.Close()
+		}
+	}()
+	for _, proxy := range []bool{false, true} {
+		target, upstream := direct.LocalAddr().String(), direct
+		if proxy {
+			target, upstream = "8.8.8.8:443", server
+		}
+		packet := append([]byte{0, 0, 0}, socks.ParseAddr(target)...)
+		packet = append(packet, []byte("hello")...)
+		if err := router.send(local, client.LocalAddr().(*net.UDPAddr).AddrPort(), packet, server.LocalAddr(), func(connection net.PacketConn) net.PacketConn { return connection }); err != nil {
+			t.Fatal(err)
+		}
+		buffer := make([]byte, 1024)
+		length, _, err := upstream.ReadFromUDP(buffer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload := buffer[:length]
+		if proxy {
+			header := socks.SplitAddr(payload)
+			if header == nil || header.String() != target {
+				t.Fatal("public IP did not use SS UDP framing")
+			}
+			payload = payload[len(header):]
+		}
+		if !bytes.Equal(payload, []byte("hello")) {
+			t.Fatal("ACL UDP payload or direct framing changed")
+		}
+	}
+}
 
 func TestFakeIPPersistenceDoesNotBlockExistingRoutes(t *testing.T) {
 	previous := routes

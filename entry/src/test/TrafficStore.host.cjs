@@ -7,7 +7,7 @@ const ts = require(process.env.TYPESCRIPT_PATH || '/Applications/DevEco-Studio.a
 
 function harness(files = new Map()) {
   const state = { time: 10000, counters: { uploadedBytes: 100, downloadedBytes: 200 }, failWrite: false,
-    shortWrite: false, failRead: false, nativeError: false, heartbeat: undefined, logs: [] };
+    shortWrite: false, failRead: false, nativeError: false, heartbeat: undefined, logs: [], connectionPhases: [] };
   const context = { getApplicationContext: () => ({ filesDir: '/virtual' }) };
   const fileIo = {
     OpenMode: { CREATE: 1, WRITE_ONLY: 2, TRUNC: 4, READ_WRITE: 8, APPEND: 16 },
@@ -28,6 +28,9 @@ function harness(files = new Map()) {
       if (state.failWrite && to.includes('server-traffic')) throw new Error('disk failure');
       files.set(to, files.get(from));
       files.delete(from);
+      if (to === '/virtual/connection-state.json') {
+        state.connectionPhases.push(JSON.parse(files.get(to)).phase);
+      }
     },
     readTextSync: filename => {
       if (state.failRead && filename.includes('server-traffic')) throw new Error('read failure');
@@ -46,7 +49,7 @@ function harness(files = new Map()) {
   const imports = {
     '@kit.AbilityKit': {},
     '@kit.CoreFileKit': { fileIo },
-    '@kit.ArkTS': { util: { TextEncoder: class {
+    '@kit.ArkTS': { util: { generateRandomUUID: () => 'session-1', TextEncoder: class {
       encodeInto(text) { return new TextEncoder().encode(text); }
     } } },
     '@kit.PerformanceAnalysisKit': { hilog: {
@@ -160,6 +163,14 @@ test('VPN heartbeat persists per-server totals without UI, retries writes and fl
   assert.equal(h.readConnectionState(h.context).traffic.uploadSpeed, 0);
 
   h.state.counters.downloadedBytes += 150;
+  h.requestVpnStop(h.context, h.readConnectionState(h.context).sessionId, 'stop-1');
+  const beforeStop = h.state.connectionPhases.length;
+  h.state.heartbeat();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(h.state.connectionPhases.slice(beforeStop), ['disconnecting', 'disconnected']);
+  const stopped = h.readConnectionState(h.context);
+  assert.equal(stopped.phase, 'disconnected');
+  assert.equal(stopped.stopRequestId, 'stop-1');
   vpn.onDestroy();
   assert.equal(h.state.heartbeat, undefined);
   assert.equal(h.readConnectionState(h.context).traffic, undefined);

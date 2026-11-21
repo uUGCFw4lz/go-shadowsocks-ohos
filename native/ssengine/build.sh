@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(cd "$ROOT/../.." && pwd)"
-NDK="${OHOS_NDK:-/Applications/DevEco-Studio.app/Contents/sdk/default/openharmony/native}"
+NDK="${OHOS_NDK:?Set OHOS_NDK to the OpenHarmony native SDK directory.}"
 CC="$NDK/llvm/bin/aarch64-unknown-linux-ohos-clang"
 SYSROOT="$NDK/sysroot"
 GO="${OHOS_GO:-go}"
@@ -21,7 +21,7 @@ fi
 
 cd "$ROOT"
 GOOS="$("$HOST_GO" env GOHOSTOS)" GOARCH="$("$HOST_GO" env GOHOSTARCH)" CGO_ENABLED=0 \
-  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go rules.go routing.go routing_udp.go traffic.go \
+  "$HOST_GO" test -mod=readonly client.go tcp.go udp.go config.go log.go rules.go acl.go routing.go routing_udp.go traffic.go \
     client_test.go udp_test.go rules_test.go routing_test.go traffic_test.go
 
 export CGO_ENABLED=1

@@ -1,9 +1,10 @@
 import { Want } from '@kit.AbilityKit';
+import { util } from '@kit.ArkTS';
 import { vpnExtension, VpnExtensionAbility } from '@kit.NetworkKit';
 import { BusinessError, systemDateTime } from '@kit.BasicServicesKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
-import { appendLog, writeConnectionState } from '../model/AppLog';
-import { RoutingStore } from '../model/RoutingStore';
+import { appendLog, readVpnStopRequest, writeConnectionState } from '../model/AppLog';
+import { isRouteMode, RoutingStore } from '../model/RoutingStore';
 import { ServerTraffic, TrafficBytes, TrafficSample, TrafficSession, TrafficStore } from '../model/TrafficStore';
 import {
   DEFAULT_SS_URL,
@@ -21,6 +22,7 @@ const TAG = 'ssvpn';
 
 export default class VpnExtAbility extends VpnExtensionAbility {
   private vpnConnection: vpnExtension.VpnConnection | undefined = undefined;
+  private vpnId: string = '';
   private tunFd: number = -1;
   private ssUrl: string = DEFAULT_SS_URL;
   private serverId: string = '';
@@ -32,47 +34,100 @@ export default class VpnExtAbility extends VpnExtensionAbility {
   private trafficEntries: ServerTraffic[] = [];
   private traffic: TrafficSample | undefined = undefined;
   private trafficError: string = '';
+  private connectionError: string = '';
+  private destroyed: boolean = false;
+  private sessionId: string = '';
+  private stopRequestId: string = '';
+  private starting: Promise<void> | undefined = undefined;
+  private stopping: Promise<void> | undefined = undefined;
 
   onCreate(want: Want): void {
     hilog.info(DOMAIN, TAG, 'VpnExtAbility onCreate');
     appendLog(this.context, 'VpnExtAbility onCreate');
+    this.sessionId = util.generateRandomUUID();
     const selectedId = want.parameters?.serverId;
     this.serverId = typeof selectedId === 'string' ? selectedId : '';
-    this.routeMode = want.parameters?.routeMode === 'gfwlist' ? 'gfwlist' : 'global';
-    writeConnectionState(this.context, this.phase, this.serverId);
+    const mode = want.parameters?.routeMode;
+    this.routeMode = mode === undefined ? 'global' : (typeof mode === 'string' ? mode : '');
+    this.publishState();
     this.heartbeat = setInterval(() => {
       this.sampleTraffic();
-      this.publishState();
+      const requestId = readVpnStopRequest(this.context, this.sessionId);
+      if (requestId && requestId !== this.stopRequestId && this.phase !== 'disconnecting') {
+        this.stopRequestedVpn(requestId);
+      } else {
+        this.publishState();
+      }
     }, 1000);
     const param = want.parameters?.ssUrl;
     if (typeof param === 'string' && param.length > 0) {
       this.ssUrl = param;
     }
-    this.startPipeline().catch((err: BusinessError | Error) => {
+    this.starting = this.startPipeline().catch(async (err: BusinessError | Error) => {
+      if (this.destroyed || this.stopRequestId) {
+        appendLog(this.context, 'VPN startup cancelled during disconnect');
+        return;
+      }
       const msg = err instanceof Error ? `${err.name} ${err.message}` : JSON.stringify(err);
+      this.connectionError = err instanceof Error ? err.message : '';
       hilog.error(DOMAIN, TAG, 'startPipeline failed %{public}s', msg);
       appendLog(this.context, `startPipeline failed: ${msg}`);
-      this.phase = 'failed';
-      this.publishState();
+      try {
+        await this.stopPipeline();
+      } catch (cleanupError) {
+        appendLog(this.context, `VPN failure cleanup failed: ${JSON.stringify(cleanupError)}`);
+      }
+      if (!this.destroyed && !this.stopRequestId) {
+        this.phase = 'failed';
+        this.publishState();
+      }
     });
   }
 
   onDestroy(): void {
     hilog.info(DOMAIN, TAG, 'VpnExtAbility onDestroy');
     appendLog(this.context, 'VpnExtAbility onDestroy');
+    this.destroyed = true;
     if (this.heartbeat !== -1) {
       clearInterval(this.heartbeat);
       this.heartbeat = -1;
     }
-    this.sampleTraffic();
+    if (this.phase !== 'disconnected' && this.phase !== 'disconnecting') {
+      this.sampleTraffic();
+      this.stopRequestedVpn(this.stopRequestId);
+    }
+  }
+
+  private stopRequestedVpn(requestId: string): void {
+    this.stopRequestId = requestId;
+    this.connectionError = '';
+    this.phase = 'disconnecting';
+    this.publishState();
+    this.finishStop().catch((err: BusinessError | Error) => {
+      appendLog(this.context, `VPN destruction failed: ${JSON.stringify(err)}`);
+      this.connectionError = 'VPN 断开失败，请查看诊断日志';
+      this.phase = 'stop-failed';
+      this.publishState();
+    });
+  }
+
+  private ensureActive(): void {
+    if (this.destroyed || this.stopRequestId) {
+      throw new Error('VPN startup cancelled');
+    }
+  }
+
+  private async finishStop(): Promise<void> {
+    await this.starting;
+    await this.stopPipeline();
     this.phase = 'disconnected';
     this.publishState();
-    this.stopPipeline();
   }
 
   private publishState(): void {
     writeConnectionState(this.context, this.phase, this.serverId,
-      this.phase === 'connected' ? this.traffic : undefined, this.trafficError);
+      this.phase === 'connected' ? this.traffic : undefined, this.trafficError, this.connectionError,
+      this.sessionId, this.stopRequestId);
   }
 
   private reportTrafficError(err: Error | BusinessError): void {
@@ -109,6 +164,9 @@ export default class VpnExtAbility extends VpnExtensionAbility {
   }
 
   private async startPipeline(): Promise<void> {
+    if (!isRouteMode(this.routeMode)) {
+      throw new Error('无效的路由模式');
+    }
     this.vpnConnection = vpnExtension.createVpnConnection(this.context);
     appendLog(this.context, 'createVpnConnection ok');
 
@@ -116,15 +174,20 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       await this.vpnConnection.protectProcessNet();
       appendLog(this.context, 'protectProcessNet ok');
     } catch (err) {
-      if (this.routeMode === 'gfwlist') {
-        throw new Error('GFWList 分流需要成功保护 VPN 出站套接字');
+      if (this.routeMode !== 'global') {
+        throw new Error('分流需要成功保护 VPN 出站套接字');
       }
       appendLog(this.context, `protectProcessNet skipped: ${JSON.stringify(err)}`);
     }
 
+    this.ensureActive();
     await this.startSsEngine();
+    this.ensureActive();
+    this.vpnId = await this.vpnConnection.generateVpnId();
+    this.ensureActive();
 
     const config: vpnExtension.VpnConfig = {
+      vpnId: this.vpnId,
       addresses: [{
         address: { address: TUN_ADDR, family: 1 },
         prefixLength: 24
@@ -146,10 +209,20 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       blockedApplications: ['org.ohos.shadowsocks']
     };
 
-    this.tunFd = await this.vpnConnection.create(config);
+    try {
+      this.tunFd = await this.vpnConnection.create(config);
+    } catch (err) {
+      const error = err as BusinessError;
+      if (error.code === 2203002) {
+        throw new Error('系统已有 VPN 连接（2203002），请在系统设置中检查 VPN 状态');
+      }
+      throw new Error(`VPN create failed (${error.code}): ${error.message}`);
+    }
+    this.ensureActive();
     appendLog(this.context, `vpn create ok tunFd=${this.tunFd} dns=8.8.8.8 via tun2socks :53->127.0.0.1:${DNS_TUN_PORT}`);
 
     await this.startTun2socks();
+    this.ensureActive();
     this.phase = 'connected';
     this.sampleTraffic();
     this.publishState();
@@ -157,6 +230,7 @@ export default class VpnExtAbility extends VpnExtensionAbility {
 
   private async startSsEngine(): Promise<void> {
     const nativeMod = await import('../model/NativeBridge');
+    this.ensureActive();
     const native = nativeMod.getNative();
     const st = typeof native.engineStatus === 'function' ? native.engineStatus() : 'n/a';
     appendLog(this.context, `native module loaded engineStatus=${st}`);
@@ -176,14 +250,15 @@ export default class VpnExtAbility extends VpnExtensionAbility {
       throw new Error('SOCKS5 127.0.0.1:1080 not ready');
     }
 
-    const probe = native.socksHttpGet(SOCKS_HOST, SOCKS_PORT, 'www.google.com', 80, 12000);
-    appendLog(this.context, `socks probe www.google.com: ${probe}`);
+    const probeHost = this.routeMode === 'china-list' ? 'www.baidu.com' : 'www.google.com';
+    const probe = native.socksHttpGet(SOCKS_HOST, SOCKS_PORT, probeHost, 80, 12000);
+    appendLog(this.context, `socks probe ${probeHost}: ${probe}`);
     if (probe.indexOf('ok ') !== 0) {
-      throw new Error(`SOCKS5 google probe failed: ${probe}`);
+      throw new Error(`SOCKS5 ${probeHost} probe failed: ${probe}`);
     }
 
-    const dnsProbe = native.dnsQuery(SOCKS_HOST, DNS_TUN_PORT, 'www.google.com', 8000);
-    appendLog(this.context, `dns tun :${DNS_TUN_PORT} www.google.com: ${dnsProbe}`);
+    const dnsProbe = native.dnsQuery(SOCKS_HOST, DNS_TUN_PORT, probeHost, 8000);
+    appendLog(this.context, `dns tun :${DNS_TUN_PORT} ${probeHost}: ${dnsProbe}`);
     if (dnsProbe.indexOf('ok ') !== 0) {
       throw new Error(`DNS tunnel 127.0.0.1:${DNS_TUN_PORT} failed: ${dnsProbe}`);
     }
@@ -192,6 +267,7 @@ export default class VpnExtAbility extends VpnExtensionAbility {
 
   private async startTun2socks(): Promise<void> {
     const nativeMod = await import('../model/NativeBridge');
+    this.ensureActive();
     const native = nativeMod.getNative();
     try {
       if (!this.serverId) {
@@ -218,13 +294,19 @@ export default class VpnExtAbility extends VpnExtensionAbility {
     appendLog(this.context, 'tun2socks started in-process');
   }
 
-  private stopPipeline(): void {
-    if (this.vpnConnection) {
-      this.vpnConnection.destroy().then(() => {
-        appendLog(this.context, 'vpn destroy ok');
-      }).catch((err: BusinessError) => {
-        appendLog(this.context, `vpn destroy failed ${JSON.stringify(err)}`);
-      });
+  private stopPipeline(): Promise<void> {
+    if (this.stopping) {
+      return this.stopping;
     }
+    const connection = this.vpnConnection;
+    if (!connection || !this.vpnId) {
+      return Promise.resolve();
+    }
+    this.stopping = connection.destroy(this.vpnId).then(() => {
+      this.tunFd = -1;
+      this.vpnId = '';
+      appendLog(this.context, 'vpn destroy ok');
+    }).finally(() => { this.stopping = undefined; });
+    return this.stopping;
   }
 }

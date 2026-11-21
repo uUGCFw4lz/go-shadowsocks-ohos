@@ -12,22 +12,56 @@ export interface ConnectionState {
   updatedAt: number;
   traffic?: TrafficSample;
   trafficError?: string;
+  connectionError?: string;
+  sessionId?: string;
+  stopRequestId?: string;
+}
+
+interface VpnStopRequest {
+  sessionId: string;
+  requestId: string;
+}
+
+function writeAtomic(path: string, content: string): void {
+  const file = fs.openSync(`${path}.tmp`, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
+  try {
+    fs.writeSync(file.fd, content);
+  } finally {
+    fs.closeSync(file);
+  }
+  fs.renameSync(`${path}.tmp`, path);
+}
+
+export function requestVpnStop(context: common.Context, sessionId: string, requestId: string): void {
+  const request: VpnStopRequest = { sessionId, requestId };
+  writeAtomic(`${appFilesDir(context)}/vpn-stop.json`, JSON.stringify(request));
+}
+
+export function readVpnStopRequest(context: common.Context, sessionId: string): string {
+  const path = `${appFilesDir(context)}/vpn-stop.json`;
+  try {
+    if (fs.accessSync(path)) {
+      const request = JSON.parse(fs.readTextSync(path)) as VpnStopRequest;
+      if (request.sessionId === sessionId && typeof request.requestId === 'string') {
+        return request.requestId;
+      }
+    }
+  } catch (err) {
+    hilog.error(DOMAIN, 'ssvpn', 'readVpnStopRequest fail %{public}s', JSON.stringify(err));
+  }
+  return '';
 }
 
 export function writeConnectionState(context: common.Context, phase: string, serverId: string,
-  traffic?: TrafficSample, trafficError?: string): void {
+  traffic?: TrafficSample, trafficError?: string, connectionError?: string, sessionId?: string,
+  stopRequestId?: string): void {
   const state: ConnectionState = {
-    phase: phase, serverId: serverId, updatedAt: Date.now(), traffic: traffic, trafficError: trafficError
+    phase: phase, serverId: serverId, updatedAt: Date.now(), traffic: traffic, trafficError: trafficError,
+    connectionError, sessionId, stopRequestId
   };
   const path = `${appFilesDir(context)}/connection-state.json`;
   try {
-    const file = fs.openSync(`${path}.tmp`, fs.OpenMode.CREATE | fs.OpenMode.WRITE_ONLY | fs.OpenMode.TRUNC);
-    try {
-      fs.writeSync(file.fd, JSON.stringify(state));
-    } finally {
-      fs.closeSync(file);
-    }
-    fs.renameSync(`${path}.tmp`, path);
+    writeAtomic(path, JSON.stringify(state));
   } catch (err) {
     hilog.error(DOMAIN, 'ssvpn', 'writeConnectionState fail %{public}s', JSON.stringify(err));
   }

@@ -110,6 +110,21 @@ test('network, invalid content and disk failure preserve the old list', async ()
   }
 });
 
+test('built-in modes persist and prepare without downloading GFWList', async () => {
+  const { RoutingStore, ROUTE_MODES, context, files, state } = harness();
+  for (const mode of ['bypass-lan', 'bypass-china', 'bypass-lan-china', 'china-list']) {
+    assert.ok(ROUTE_MODES.some(option => option.id === mode));
+    await RoutingStore.saveMode(context, mode);
+    assert.equal(await RoutingStore.mode(context), mode);
+    const config = JSON.parse(files.get(RoutingStore.prepare(context, mode)));
+    assert.equal(config.mode, mode);
+  }
+  assert.equal(state.destroyed, 0);
+  await assert.rejects(() => RoutingStore.saveMode(context, 'unsupported'));
+  assert.throws(() => RoutingStore.prepare(context, 'unsupported'));
+  assert.equal(await RoutingStore.mode(context), 'china-list');
+});
+
 test('real GFWList agrees with native domain projection', { skip: !process.env.GFWLIST_TEST_FILE }, () => {
   const { parseGfwList } = harness();
   const rules = parseGfwList(fs.readFileSync(process.env.GFWLIST_TEST_FILE, 'utf8'));

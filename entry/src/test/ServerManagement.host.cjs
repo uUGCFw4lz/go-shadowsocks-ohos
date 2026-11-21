@@ -12,7 +12,7 @@ const code = ts.transpileModule(`class Probe { ${source.slice(start, end)} }; gl
   compilerOptions: { target: ts.ScriptTarget.ES2020 }
 }).outputText;
 
-function harness(requested = true) {
+function harness(requested = true, vpnOverrides = {}) {
   const active = { id: 'active', name: 'Active', host: 'example.com', port: 8388, method: 'aes-256-gcm', password: 'fixture' };
   const other = { ...active, id: 'other', name: 'Other' };
   const imported = { ...other, id: '', name: 'Imported' };
@@ -54,7 +54,8 @@ function harness(requested = true) {
     } },
     readConnectionState: () => connectionState,
     TrafficStore: { load: () => trafficEntries },
-    formatTraffic: bytes => `${bytes} B`
+    formatTraffic: bytes => `${bytes} B`,
+    ...vpnOverrides
   };
   vm.runInNewContext(code, sandbox);
   const page = new sandbox.Probe();
@@ -67,6 +68,47 @@ function harness(requested = true) {
   return { page, active, other, saves, dialogs, scanState, counts: () => ({ clipboardReads, scans }), fail: () => { failSave = true; },
     setConnection: value => { connectionState = value; } };
 }
+
+test('stop waits for matching cleanup acknowledgment before stopping the extension', async () => {
+  let scheduled;
+  const actions = [];
+  const { page, setConnection } = harness(true, {
+    util: { generateRandomUUID: () => 'stop-1' },
+    requestVpnStop: (_context, session, request) => { actions.push(['request', session, request]); },
+    vpnExtension: { stopVpnExtensionAbility: async () => { actions.push('stop extension'); } },
+    setTimeout: resolve => { scheduled = resolve; }
+  });
+  const session = { sessionId: 'vpn-1', updatedAt: 1234 };
+  setConnection({ ...session, phase: 'connected' });
+  const stopping = page.stopVpn({});
+  assert.deepEqual(actions, [['request', 'vpn-1', 'stop-1']]);
+  setConnection({ ...session, phase: 'disconnected', stopRequestId: 'old-request' });
+  scheduled();
+  await Promise.resolve();
+  assert.equal(actions.length, 1);
+  setConnection({ ...session, sessionId: 'vpn-2', phase: 'disconnected', stopRequestId: 'stop-1' });
+  scheduled();
+  await Promise.resolve();
+  assert.equal(actions.length, 1);
+  setConnection({ ...session, phase: 'disconnected', stopRequestId: 'stop-1' });
+  scheduled();
+  await stopping;
+  assert.deepEqual(actions, [['request', 'vpn-1', 'stop-1'], 'stop extension']);
+});
+
+test('stop reports cleanup failure without stopping the extension', async () => {
+  let stopped = false;
+  const { page, setConnection } = harness(true, {
+    util: { generateRandomUUID: () => 'stop-1' },
+    requestVpnStop: (_context, sessionId, stopRequestId) => {
+      setConnection({ sessionId, stopRequestId, phase: 'stop-failed', connectionError: 'VPN 断开失败' });
+    },
+    vpnExtension: { stopVpnExtensionAbility: async () => { stopped = true; } }
+  });
+  setConnection({ sessionId: 'vpn-1', phase: 'connected' });
+  await assert.rejects(page.stopVpn({}), /VPN 断开失败/);
+  assert.equal(stopped, false);
+});
 
 test('connected manual add and active-server copy preserve active configuration and selection', async () => {
   const { page, active, saves } = harness();

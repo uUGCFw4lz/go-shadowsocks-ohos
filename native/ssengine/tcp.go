@@ -106,7 +106,10 @@ func dialTCPDestination(target socks.Addr, server string, shadow func(net.Conn) 
 		logf("route TCP direct %s", destination)
 		host, _, _ := net.SplitHostPort(destination)
 		address, parseErr := netip.ParseAddr(host)
-		fallback := parseErr == nil && address.IsGlobalUnicast() && !address.IsPrivate()
+		routes.RLock()
+		gfwlist := routes.rules != nil && routes.acl == nil
+		routes.RUnlock()
+		fallback := gfwlist && parseErr == nil && address.IsGlobalUnicast() && !address.IsPrivate()
 		timeout := 10 * time.Second
 		if fallback {
 			timeout = 1500 * time.Millisecond

@@ -19,23 +19,17 @@ App 流量 → HarmonyOS VPN TUN fd
 
 当前通过 NAPI 包装层 `libssengine.so` 在进程内加载 `libssgo.so`，不再启动独立 Go 可执行文件。
 
-需要使用HarmonyOS的go编译器来编译，否则`https://github.com/sysit/ohos-go.git`
+- 安装支持 `openharmony/arm64` 的 Go 工具链，例如 [ohos-go](https://github.com/sysit/ohos-go)。普通 `GOOS=linux` 的 Go 动态库存在 OHOS TLS 兼容问题。
+- 将 `OHOS_NDK` 设为 OpenHarmony native SDK 目录（包含 `llvm/` 和 `sysroot/`）。
+- 将 `OHOS_GO` 设为适配工具链的 Go 可执行文件。若 PATH 中的 `go` 已支持 `openharmony/arm64`，可省略该变量。
+- 主机回归测试默认使用 PATH 中的 `go`（1.24.1 或更高版本），也可用 `HOST_GO` 指定。
 
-标准 Linux Go 的 c-shared 仍然不兼容这里的动态 TLS。需要为ohos定制的go编译器。下载ohos-go，并解压到tmp目录。
-
-```bash
-curl -fL --connect-timeout 20 --max-time 180 https://codeload.github.com/sysit/ohos-go/tar.gz/2417e0834a96530125db3d295884c1ddf86777d7 -o /tmp/shadowsocks-ohos-go-2417e08.tar.gz && mkdir -p /tmp/shadowsocks-ohos-go-2417e08 && tar -xzf /tmp/shadowsocks-ohos-go-2417e08.tar.gz --strip-components=1 -C /tmp/shadowsocks-ohos-go-2417e08 && rg -n 'c-shared|TLS|make.bash|GOOS|CGO|CC=' /tmp/shadowsocks-ohos-go-2417e08/docs -g '*.md' | head -85
-```
-
-- 使用支持 `openharmony/arm64` 的 Go 工具链；普通 `GOOS=linux` 的 Go 动态库存在 OHOS TLS 兼容问题。
-- 主机回归测试使用 PATH 中的标准 `go`（1.24.1 或更高版本），可通过 `HOST_GO` 指定。
-- 安装 DevEco Studio 的 ARM64 native SDK，可通过 `OHOS_NDK` 覆盖默认 SDK 路径。
-- 当前 `native/ssengine/go.mod` 使用本地 `replace`：`go-shadowsocks2` 需要包含新增的 xchacha 实现，`go-tun2socks` 需要包含 `StartFromIO` 适配。更换电脑时须更新这两个路径。
-
-在项目根目录执行（`OHOS_GO` 改成实际工具链位置）：
+在项目根目录执行，将示例路径替换为自己的安装路径：
 
 ```sh
-OHOS_GO=/tmp/shadowsocks-ohos-go-2417e08/bin/go ./native/ssengine/build.sh
+OHOS_NDK="/path/to/openharmony/native" \
+OHOS_GO="/path/to/ohos-go/bin/go" \
+./native/ssengine/build.sh
 ```
 
 脚本先运行 xchacha URL/加密兼容测试及 DNS 回归测试，再生成：
@@ -51,7 +45,7 @@ OHOS_GO=/tmp/shadowsocks-ohos-go-2417e08/bin/go ./native/ssengine/build.sh
 ## 加密方式
 
 添加和编辑服务器支持 `chacha20-ietf-poly1305`、`aes-128-gcm`、`aes-256-gcm` 和 `xchacha20-ietf-poly1305`。
-xchacha 对应本地 Go 库中的 `AEAD_XCHACHA20_POLY1305`；服务端须支持同一算法，密码和加密方式必须匹配。
+xchacha 对应 Go 引擎中的 `AEAD_XCHACHA20_POLY1305`；服务端须支持同一算法，密码和加密方式必须匹配。
 
 ## 分享和导入服务器
 
@@ -77,17 +71,35 @@ xchacha 对应本地 Go 库中的 `AEAD_XCHACHA20_POLY1305`；服务端须支持
 - 每个服务器显示累计上传、下载用量；当前已连接的服务器同时显示上传、下载速度，每秒刷新。速度按实际采样间隔计算，空闲时归零，断开后隐藏。
 - 用量按服务器配置 ID 保存在本机，跨连接和应用重启累计。编辑同一配置保留累计值；复制、重新导入会生成新 ID，从零开始。不包含安装此功能前的历史流量。
 - Go 在 Shadowsocks 加密层下统计 TCP/UDP 实际读写字节，包含 SS 协议和加密开销，不包含 IP/TCP/UDP 包头及 TCP 重传；GFWList 直连流量和连接前的诊断探测不计入，因此不是运营商计费用量。
-- VPN 扩展独立于界面采样并原子保存累计值，关闭主界面不会停止统计；正常断开时补采样。进程被强制终止时，最后一次成功保存之后的流量可能丢失（正常采样间隔约一秒）。统计读取或保存失败会显示错误，不覆盖已有累计值。
+- VPN 扩展独立于界面采样并原子保存累计值，关闭主界面不会停止统计；收到断开请求时完成最后一次采样，然后直接发布「正在断开」。进程被强制终止时，最后一次成功保存之后的流量可能丢失（正常采样间隔约一秒）。统计读取或保存失败会显示错误，不覆盖已有累计值。
 - 使用二进制单位 B、KiB、MiB、GiB，速度单位为每秒字节。更新后必须重建并打包 `libssgo.so`，旧动态库不支持统计接口。
 - 回归测试：`node --test entry/src/test/TrafficStore.host.cjs entry/src/test/ServerManagement.host.cjs`；native 计数、并发和直连排除测试已加入 `native/ssengine/build.sh`。
 
-## GFWList 分流
+## 路由与分流
 
-- 主界面选择「全局」或「GFWList」，路由模式会保存；连接期间需先断开再切换。
+- 主界面支持六种路由模式，选择会保存；连接期间需先断开再切换。
+
+| 模式 | 路由行为 |
+| --- | --- |
+| 全局 | 全部经 SS |
+| 绕过局域网地址 | ACL 中的局域网和保留网段直连，其余经 SS |
+| 绕过中国大陆地址 | 中国大陆网段和直连域名直连，其余经 SS；ACL 中的代理域名仍优先代理 |
+| 绕过局域网及中国大陆地址 | 同上，另将局域网和保留网段直连 |
+| GFWList | 命中列表的域名经 SS，其余默认直连 |
+| 仅代理中国大陆地址 | 中国大陆网段经 SS，其余直连 |
+
+- 四种新增模式无需下载 GFWList。规则内置于 Go 动态库，来自 `shadowsocks/shadowsocks-android` 的 `core/src/main/assets/acl`，对应参考项目提交 `ae28fd91931fe4d2d5aab044de9ceaf9ed07ad56`；快照保存在 `native/ssengine/acl/`，原项目 GPL-3.0-or-later 许可声明保存在该目录的 `LICENSE`。规则更新须替换快照并重建动态库，不会在每次连接时联网下载。
+- TCP 和 UDP 共用路由判断：先匹配显式直连/代理域名，再按真实目标 IP 匹配 CIDR，最后使用模式默认策略。常见域名后缀用哈希查找，其余 ACL 域名表达式在连接时编译；IPv4 网段按前缀查找，不逐条扫描整张列表。
+- 新增模式的显式域名规则使用持久化虚拟 IP，转发时恢复域名，保留域名直连/代理优先级；代理域名交由 SS 服务端解析。其他域名使用直连 DNS 返回真实 IPv4，再按 IP 网段分流。直接经 SOCKS 请求未列出的域名时，在本地解析 IPv4 后按相同规则处理；解析超时或失败明确报错。仅代理中国大陆模式使用大陆站点做连接诊断，不强制要求 Google 直连成功。
+- 新增模式不会因直连 TCP 超时而改走代理。AAAA、HTTPS/SVCB 查询返回空结果，防止 IPv6/地址提示跳过 IPv4 分流；仍不提供完整 IPv6 VPN，分流不是防泄漏模式。
+- 系统 VPN 使用 `generateVpnId()` 创建独立的 IPv4 隧道。应用内点「断开」时，扩展先销毁本次连接的隧道并确认成功，界面再停止扩展；不会等待旧状态过期，也不会销毁其他 VPN。若系统仍报 `2203002`，请在系统设置中检查现有 VPN。
+
+### GFWList
+
 - 首次使用 GFWList 时点击刷新图标下载规则。依次尝试 gcore、testingcf、fastly jsDelivr HTTPS 镜像和 GitHub 官方原始地址，来源来自 GFWList 仓库 README。
 - 更新有超时和 4 MiB 大小限制，先验证并规范化域名，再原子替换规则文件。更新失败保留旧列表；连接期间更新在下次连接生效。未下载有效列表时不能启动 GFWList 模式。
 - GFWList 模式以直连为默认，支持域名及子域、`||domain`、`.domain`、`*.domain` 和可提取主机名的 URL 规则；`@@` 域名例外优先直连。URL 代理规则按整个域名处理，不按路径匹配。
-- 正则、复杂通配符、带选项的规则、IP 规则及仅针对 URL 路径的例外不支持，下载后显示跳过数量；不是 Android 完整 ACL 或自定义 ACL 编辑器。
+- GFWList 下载器不支持正则、复杂通配符、带选项的规则、IP 规则及仅针对 URL 路径的例外，下载后显示跳过数量；与新增模式的内置 ACL 解析器不同。本应用不提供自定义 ACL 编辑器或递归导入规则。
 - 系统 VPN 仍接管 IPv4 流量；Go 引擎在 SOCKS TCP/UDP 层决定直连或 SS。DNS 使用 `golang.org/x/net/dns/dnsmessage` 解析，命中域名返回 `198.18.0.0/15` 虚拟 IP，转发时恢复原域名交由 SS 服务端解析。映射持久化，重连不会将缓存的虚拟 IP 指向其他域名。
 - 未命中的域名使用 `223.5.5.5` / `119.29.29.29` 直连 DNS。命中域名的 AAAA、HTTPS/SVCB 查询返回空结果，避免真实 IPv6 或地址提示绕过 IPv4 分流。其他命中域名 DNS 查询经现有 SS TCP DNS 隧道。
 - 分流依赖应用使用 VPN DNS。自带 DoH/DoT、连接前缓存的真实 IP、直接访问 IP 无法可靠还原域名，默认直连。无法还原域名的公网 IP 若 TCP 建连超过 1.5 秒，则经 SS 重试，避免缓存的 Google IP 一直直连超时；内网地址、明确的直连域名、非超时错误不触发此兜底。兜底只针对 TCP 建连，不处理 UDP 或已连接后的停顿，也不保证修复错误 DNS 地址。首次切换建议关闭浏览器安全 DNS 并重启浏览器；当前不提供完整 IPv6 代理。
@@ -102,7 +114,7 @@ xchacha 对应本地 Go 库中的 `AEAD_XCHACHA20_POLY1305`；服务端须支持
 ## 试用
 
 1. DevEco Studio 打开本工程，用 HarmonyOS 手机签名安装。
-2. 打开应用，确认 SS URL（已预填你验证过的节点）。
+2. 打开应用，添加自己的 Shadowsocks 服务器配置。
 3. 点「连接 VPN」，允许系统 VPN 授权。
 4. 状态栏出现钥匙后，用浏览器访问网站。
 5. 日志：`filesDir/ss.log`、`filesDir/t2s.log`。
